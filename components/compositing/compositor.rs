@@ -437,7 +437,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         if !self.pipeline_details.contains_key(&pipeline_id) {
             self.pipeline_details.insert(pipeline_id, PipelineDetails::new());
         }
-        return self.pipeline_details.get_mut(&pipeline_id).unwrap();
+        self.pipeline_details.get_mut(&pipeline_id).unwrap()
     }
 
     pub fn get_pipeline<'a>(&'a self, pipeline_id: PipelineId) -> &'a CompositionPipeline {
@@ -557,6 +557,16 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                                                    opts::get().tile_size);
 
         self.get_or_create_pipeline_details(pipeline.id).pipeline = Some(pipeline.clone());
+        let details = self.get_or_create_pipeline_details(pipeline.id);
+        match details.pipeline {
+            Some(_) => {
+                debug!("We already had details for {:?}!", pipeline.id);
+            }
+            None => {
+                //panic!("Fresh details (with no pipeline) for {:?}", pipeline.id);
+                details.pipeline = Some(pipeline.clone());
+            }
+        }
 
         // All root layers mask to bounds.
         *root_layer.masks_to_bounds.borrow_mut() = true;
@@ -566,7 +576,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             *root_layer.bounds.borrow_mut() = Rect::from_untyped(&frame_rect);
         }
 
-        return root_layer;
+        root_layer
     }
 
     fn create_frame_tree_root_layers(&mut self,
@@ -1152,7 +1162,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
 
         profile(ProfilerCategory::Compositing, None, self.time_profiler_chan.clone(), || {
-            debug!("compositor: compositing");
             // Adjust the layer dimensions as necessary to correspond to the size of the window.
             self.scene.viewport = Rect {
                 origin: Point2D::zero(),
@@ -1436,4 +1445,3 @@ pub enum CompositingReason {
     /// The window has been zoomed.
     Zoom,
 }
-

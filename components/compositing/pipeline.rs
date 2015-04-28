@@ -25,6 +25,15 @@ use std::sync::mpsc::{Receiver, channel};
 use url::Url;
 use util::geometry::{PagePx, ViewportPx};
 use util::opts;
+use rust_sessions::{Chan, Choose, Eps, Rec, Var, Z, session_channel};
+use std::cell::{RefCell, Cell};
+
+type PaintPermissionGranted = Var<Z>;
+type PaintPermissionRevoked = Var<Z>;
+
+pub type PipelineToPaint =
+Choose<PaintPermissionGranted,
+Choose<PaintPermissionRevoked, Eps>>;
 
 /// A uniquely-identifiable pipeline of script task, layout task, and paint task.
 pub struct Pipeline {
@@ -34,6 +43,7 @@ pub struct Pipeline {
     /// A channel to layout, for performing reflows and shutdown.
     pub layout_chan: LayoutControlChan,
     pub paint_chan: PaintChan,
+    pub session_paint_chan: RefCell<Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>>,
     pub layout_shutdown_port: Receiver<()>,
     pub paint_shutdown_port: Receiver<()>,
     /// URL corresponding to the most recently-loaded page.
@@ -45,6 +55,7 @@ pub struct Pipeline {
     /// animations cause composites to be continually scheduled.
     pub running_animations: bool,
     pub children: Vec<FrameId>,
+    to_sendable_count: Cell<usize>,
 }
 
 /// The subset of the pipeline that is needed for layer composition.
@@ -75,12 +86,15 @@ impl Pipeline {
                            load_data: LoadData,
                            device_pixel_ratio: ScaleFactor<ViewportPx, DevicePixel, f32>)
                            -> Pipeline
-                           where LTF: LayoutTaskFactory, STF:ScriptTaskFactory {
+                           where LTF: LayoutTaskFactory, STF:ScriptTaskFactory
+    {
         let layout_pair = ScriptTaskFactory::create_layout_channel(None::<&mut STF>);
         let (paint_port, paint_chan) = PaintChan::new();
         let (paint_shutdown_chan, paint_shutdown_port) = channel();
         let (layout_shutdown_chan, layout_shutdown_port) = channel();
         let (pipeline_chan, pipeline_port) = channel();
+
+        let (pipeline_to_paint_tx, pipeline_to_paint_rx) = session_channel();
 
         let failure = Failure {
             pipeline_id: id,
@@ -136,6 +150,7 @@ impl Pipeline {
 
         PaintTask::create(id,
                           paint_port,
+                          pipeline_to_paint_rx,
                           compositor_proxy,
                           constellation_chan.clone(),
                           font_cache_task.clone(),
@@ -165,6 +180,7 @@ impl Pipeline {
                       script_chan,
                       LayoutControlChan(pipeline_chan),
                       paint_chan,
+                      pipeline_to_paint_tx,
                       layout_shutdown_port,
                       paint_shutdown_port,
                       load_data.url,
@@ -176,6 +192,7 @@ impl Pipeline {
                script_chan: ScriptControlChan,
                layout_chan: LayoutControlChan,
                paint_chan: PaintChan,
+               pipeline_to_paint: Chan<(), Rec<PipelineToPaint>>,
                layout_shutdown_port: Receiver<()>,
                paint_shutdown_port: Receiver<()>,
                url: Url,
@@ -187,6 +204,7 @@ impl Pipeline {
             script_chan: script_chan,
             layout_chan: layout_chan,
             paint_chan: paint_chan,
+            session_paint_chan: RefCell::new(Some(pipeline_to_paint.enter())),
             layout_shutdown_port: layout_shutdown_port,
             paint_shutdown_port: paint_shutdown_port,
             url: url,
@@ -194,6 +212,7 @@ impl Pipeline {
             children: vec!(),
             rect: rect,
             running_animations: false,
+            to_sendable_count: Cell::new(0)
         }
     }
 
@@ -243,6 +262,8 @@ impl Pipeline {
     }
 
     pub fn to_sendable(&self) -> CompositionPipeline {
+        self.to_sendable_count.set(self.to_sendable_count.get() + 1);
+        debug!("{:?}, to_sendable: {}", self.id, self.to_sendable_count.get());
         CompositionPipeline {
             id: self.id.clone(),
             script_chan: self.script_chan.clone(),

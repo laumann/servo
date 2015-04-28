@@ -38,6 +38,8 @@ use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::task::spawn_named;
 
+use rust_sessions::{Chan, Recv, Offer, Choose, Rec, Var, Z, Eps};
+
 /// Information about a hardware graphics layer that layout sends to the painting task.
 #[derive(Clone)]
 pub struct PaintLayer {
@@ -66,6 +68,22 @@ pub struct PaintRequest {
     pub layer_id: LayerId,
     pub epoch: Epoch,
 }
+
+type PaintPermissionGranted = Var<Z>;
+type PaintPermissionRevoked = Var<Z>;
+
+pub type PipelineToPaint =
+Offer<PaintPermissionGranted,
+Offer<PaintPermissionRevoked,
+      Eps>>;
+
+// Complicated protocol for the compositor to the paint task
+pub type CompositorToPaint = Offer<UnusedBuffer, Paint>;
+pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Exiting>>;
+pub type Paint        = Recv<Vec<PaintRequest>, Choose<Var<Z>, Exiting>>;
+pub type Exiting      = Choose<Eps, Rec<Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Eps>>>>;
+
+pub type LayoutToPaint = Var<Z>;
 
 pub enum Msg {
     PaintInit(Arc<StackingContext>),
@@ -138,6 +156,7 @@ macro_rules! native_graphics_context(
 impl<C> PaintTask<C> where C: PaintListener + Send + 'static {
     pub fn create(id: PipelineId,
                   port: Receiver<Msg>,
+                  pipeline_chan: Chan<(), Rec<PipelineToPaint>>,
                   compositor: C,
                   constellation_chan: ConstellationChan,
                   font_cache_task: FontCacheTask,
@@ -175,9 +194,8 @@ impl<C> PaintTask<C> where C: PaintListener + Send + 'static {
                 paint_task.start();
 
                 // Destroy all the buffers.
-                match paint_task.native_graphics_context.as_ref() {
-                    Some(ctx) => paint_task.buffer_map.clear(ctx),
-                    None => (),
+                if let Some(ctx) = paint_task.native_graphics_context.as_ref() {
+                    paint_task.buffer_map.clear(ctx);
                 }
 
                 // Tell all the worker threads to shut down.
@@ -189,6 +207,42 @@ impl<C> PaintTask<C> where C: PaintListener + Send + 'static {
             debug!("paint_task: shutdown_chan send");
             shutdown_chan.send(()).unwrap();
         }, ConstellationMsg::Failure(failure_msg), c);
+    }
+
+// type PaintPermissionGranted = Var<Z>;
+// type PaintPermissionRevoked = Var<Z>;
+
+// pub type PipelineToPaint =
+// Offer<PaintPermissionGranted,
+// Offer<PaintPermissionRevoked,
+//       Eps>>;
+
+// // Complicated protocol for the compositor to the paint task
+// pub type CompositorToPaint = Offer<UnusedBuffer, Paint>;
+// pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Exiting>>;
+// pub type Paint        = Recv<Vec<PaintRequest>, Choose<Var<Z>, Exiting>>;
+// pub type Exiting      = Choose<Eps, Rec<Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Eps>>>>;
+
+// pub type LayoutToPaint = Var<Z>;
+
+    fn run(&mut self,
+           pipeline_chan: Chan<(), Rec<PipelineToPaint>>,
+           layout_chan: Chan<(), Rec<LayoutToPaint>>)
+    {
+        let mut pipeline_chan = pipeline_chan.enter();
+
+        // enum ChanToRead {
+        //     Pipeline,
+        //     Layout,
+        //     Compositor
+        // }
+        loop {
+            // let chan_to_read = {
+            //     let sel = ChanSelect::new();
+            //     sel.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
+            //     sel.add_offer_
+            // };
+        }
     }
 
     fn start(&mut self) {
@@ -299,17 +353,14 @@ impl<C> PaintTask<C> where C: PaintListener + Send + 'static {
             return None
         }
 
-        match self.buffer_map.find(tile.screen_rect.size) {
-            Some(mut buffer) => {
-                buffer.rect = tile.page_rect;
-                buffer.screen_pos = tile.screen_rect;
-                buffer.resolution = scale;
-                buffer.native_surface.mark_wont_leak();
-                buffer.painted_with_cpu = true;
-                buffer.content_age = tile.content_age;
-                return Some(buffer)
-            }
-            None => {}
+        if let Some(mut buffer) = self.buffer_map.find(tile.screen_rect.size) {
+            buffer.rect = tile.page_rect;
+            buffer.screen_pos = tile.screen_rect;
+            buffer.resolution = scale;
+            buffer.native_surface.mark_wont_leak();
+            buffer.painted_with_cpu = true;
+            buffer.content_age = tile.content_age;
+            return Some(buffer)
         }
 
         // Create an empty native surface. We mark it as not leaking
@@ -646,4 +697,3 @@ pub static THREAD_TINT_COLORS: [Color; 8] = [
     Color { r: 255.0/255.0, g: 249.0/255.0, b: 201.0/255.0, a: 0.7 },
     Color { r: 137.0/255.0, g: 196.0/255.0, b: 78.0/255.0, a: 0.7 },
 ];
-

@@ -69,6 +69,10 @@ path = "../script_traits"
 [dependencies.string_cache]
 git = "https://github.com/servo/string-cache"
 
+[dependencies.rust_sessions]
+git = "https://github.com/Munksgaard/rust-sessions"
+branch = "for-servo"
+
 [dependencies]
 url = "0.2.16"
 time = "0.1.12"

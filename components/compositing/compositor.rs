@@ -61,7 +61,7 @@ pub struct IOCompositor<Window: WindowMethods> {
     context: Option<RenderContext>,
 
     /// The root pipeline.
-    root_pipeline: Option<CompositionPipeline>,
+    root_pipeline: Option<Rc<CompositionPipeline>>,
 
     /// Tracks details about each active pipeline that the compositor knows about.
     pipeline_details: HashMap<PipelineId, PipelineDetails>,
@@ -159,7 +159,7 @@ struct HitTestResult {
 
 struct PipelineDetails {
     /// The pipeline associated with this PipelineDetails object.
-    pipeline: Option<CompositionPipeline>,
+    pipeline: Option<Rc<CompositionPipeline>>,
 
     /// The status of this pipeline's ScriptTask.
     ready_state: ReadyState,
@@ -296,9 +296,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.remove_outstanding_paint_msg();
             }
 
-            (Msg::SetFrameTree(frame_tree, response_chan, new_constellation_chan),
+            (Msg::SetFrameTree(frame_tree, pipeline, response_chan, new_constellation_chan),
              ShutdownState::NotShuttingDown) => {
-                self.set_frame_tree(&frame_tree, response_chan, new_constellation_chan);
+                self.set_frame_tree(frame_tree, pipeline, response_chan, new_constellation_chan);
                 self.send_viewport_rects_for_all_layers();
                 self.get_title_for_main_frame();
             }
@@ -440,11 +440,11 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         self.pipeline_details.get_mut(&pipeline_id).unwrap()
     }
 
-    pub fn get_pipeline<'a>(&'a self, pipeline_id: PipelineId) -> &'a CompositionPipeline {
+    pub fn get_pipeline<'a>(&'a self, pipeline_id: PipelineId) -> Rc<CompositionPipeline> {
         match self.pipeline_details.get(&pipeline_id) {
             Some(ref details) => {
                 match details.pipeline {
-                    Some(ref pipeline) => pipeline,
+                    Some(ref pipeline) => pipeline.clone(),
                     None => panic!("Compositor layer has an unitialized pipeline ({:?}).",
                                    pipeline_id),
 
@@ -516,19 +516,28 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 
     fn set_frame_tree(&mut self,
-                      frame_tree: &SendableFrameTree,
+                      frame_tree: SendableFrameTree,
+                      pipeline: Option<CompositionPipeline>,
                       response_chan: Sender<()>,
                       new_constellation_chan: ConstellationChan) {
         response_chan.send(()).unwrap();
 
-        self.root_pipeline = Some(frame_tree.pipeline.clone());
+        //self.root_pipeline = Some(frame_tree.pipeline.clone());
+
+        let pipeline_rc = if let Some(pipeline) = pipeline {
+            let rc = Rc::new(pipeline);
+            self.get_or_create_pipeline_details(frame_tree.pipeline_id).pipeline = Some(rc.clone());
+            rc
+        } else {
+            self.get_pipeline(frame_tree.pipeline_id)
+        };
+        self.root_pipeline = Some(pipeline_rc.clone());
 
         // If we have an old root layer, release all old tiles before replacing it.
-        match self.scene.root {
-            Some(ref layer) => layer.clear_all_tiles(self),
-            None => { }
+        if let Some(ref layer) = self.scene.root {
+            layer.clear_all_tiles(self);
         }
-        self.scene.root = Some(self.create_frame_tree_root_layers(frame_tree, None));
+        self.scene.root = Some(self.create_frame_tree_root_layers(&frame_tree, pipeline_rc, None));
         self.scene.set_root_layer_size(self.window_size.as_f32());
 
         // Initialize the new constellation channel by sending it the root window size.
@@ -540,11 +549,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 
     fn create_root_layer_for_pipeline_and_rect(&mut self,
-                                               pipeline: &CompositionPipeline,
+                                               pipeline_id: PipelineId,
+                                               pipeline: Rc<CompositionPipeline>,
                                                frame_rect: Option<TypedRect<PagePx, f32>>)
-                                               -> Rc<Layer<CompositorData>> {
+                                               -> Rc<Layer<CompositorData>>
+    {
         let layer_properties = LayerProperties {
-            pipeline_id: pipeline.id,
+            pipeline_id: pipeline_id,
             epoch: Epoch(0),
             id: LayerId::null(),
             rect: Rect::zero(),
@@ -555,18 +566,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         let root_layer = CompositorData::new_layer(layer_properties,
                                                    WantsScrollEventsFlag::WantsScrollEvents,
                                                    opts::get().tile_size);
-
-        self.get_or_create_pipeline_details(pipeline.id).pipeline = Some(pipeline.clone());
-        let details = self.get_or_create_pipeline_details(pipeline.id);
-        match details.pipeline {
-            Some(_) => {
-                debug!("We already had details for {:?}!", pipeline.id);
-            }
-            None => {
-                //panic!("Fresh details (with no pipeline) for {:?}", pipeline.id);
-                details.pipeline = Some(pipeline.clone());
-            }
-        }
 
         // All root layers mask to bounds.
         *root_layer.masks_to_bounds.borrow_mut() = true;
@@ -581,14 +580,16 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
     fn create_frame_tree_root_layers(&mut self,
                                      frame_tree: &SendableFrameTree,
+                                     pipeline: Rc<CompositionPipeline>,
                                      frame_rect: Option<TypedRect<PagePx, f32>>)
                                      -> Rc<Layer<CompositorData>> {
-        let root_layer = self.create_root_layer_for_pipeline_and_rect(&frame_tree.pipeline,
+        let root_layer = self.create_root_layer_for_pipeline_and_rect(frame_tree.pipeline_id,
+                                                                      pipeline.clone(),
                                                                       frame_rect);
         for kid in frame_tree.children.iter() {
-            root_layer.add_child(self.create_frame_tree_root_layers(kid, kid.rect));
+            root_layer.add_child(self.create_frame_tree_root_layers(kid, pipeline.clone(), kid.rect));
         }
-        return root_layer;
+        root_layer
     }
 
     fn find_pipeline_root_layer(&self, pipeline_id: PipelineId)

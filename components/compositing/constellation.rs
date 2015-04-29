@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use pipeline::{Pipeline, CompositionPipeline};
+use pipeline::Pipeline;
 
 use compositor_task::CompositorProxy;
 use compositor_task::Msg as CompositorMsg;
@@ -165,7 +165,7 @@ impl<'a> Iterator for FrameTreeIterator<'a> {
 }
 
 pub struct SendableFrameTree {
-    pub pipeline: CompositionPipeline,
+    pub pipeline_id: PipelineId,
     pub rect: Option<TypedRect<PagePx, f32>>,
     pub children: Vec<SendableFrameTree>,
 }
@@ -950,14 +950,15 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
 
     // Convert a frame to a sendable form to pass to the compositor
     fn frame_to_sendable(&self, frame_id: FrameId) -> SendableFrameTree {
-        let pipeline = self.pipeline(self.frame(frame_id).current);
+        let pipeline_id = self.frame(frame_id).current;
 
         let mut frame_tree = SendableFrameTree {
-            pipeline: pipeline.to_sendable(),
-            rect: pipeline.rect,
+            pipeline_id: pipeline_id,
+            rect: self.pipeline(pipeline_id).rect,
             children: vec!(),
         };
 
+        let pipeline = self.pipeline(pipeline_id);
         for child_frame_id in &pipeline.children {
             frame_tree.children.push(self.frame_to_sendable(*child_frame_id));
         }
@@ -979,10 +980,23 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
         if let Some(root_frame_id) = self.root_frame_id {
             let frame_tree = self.frame_to_sendable(root_frame_id);
 
+
+            let sendable_pipeline = {
+                let pipeline = self.pipeline(self.frame(root_frame_id).current);
+                if pipeline.shared_with_compositor.get() == 0 {
+                    Some(pipeline.to_sendable())
+                } else {
+                    None
+                }
+            };
+
             let (chan, port) = channel();
-            self.compositor_proxy.send(CompositorMsg::SetFrameTree(frame_tree,
-                                                                   chan,
-                                                                   self.chan.clone()));
+            self.compositor_proxy.send(CompositorMsg::SetFrameTree(
+                frame_tree,
+                sendable_pipeline,
+                chan,
+                self.chan.clone()));
+
             if port.recv().is_err() {
                 debug!("Compositor has discarded SetFrameTree");
                 return; // Our message has been discarded, probably shutting down.

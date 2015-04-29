@@ -21,6 +21,7 @@ use msg::compositor_msg::{Epoch, LayerId, LayerMetadata, ReadyState};
 use msg::compositor_msg::{PaintListener, PaintState, ScriptListener, ScrollPolicy};
 use msg::constellation_msg::{ConstellationChan, PipelineId};
 use msg::constellation_msg::{Key, KeyState, KeyModifiers};
+use pipeline::CompositionPipeline;
 use profile::mem;
 use profile::time;
 use std::sync::mpsc::{channel, Sender, Receiver};
@@ -206,7 +207,7 @@ pub enum Msg {
     /// Alerts the compositor that a `PaintMsg` has been discarded.
     PaintMsgDiscarded,
     /// Replaces the current frame tree, typically called during main frame navigation.
-    SetFrameTree(SendableFrameTree, Sender<()>, ConstellationChan),
+    SetFrameTree(SendableFrameTree, Option<CompositionPipeline>, Sender<()>, ConstellationChan),
     /// The load of a page has completed.
     LoadComplete,
     /// Indicates that the scrolling timeout with the given starting timestamp has happened and a
@@ -303,4 +304,3 @@ pub trait CompositorEventListener {
     /// Requests that the compositor send the title for the main frame as soon as possible.
     fn get_title_for_main_frame(&self);
 }
-

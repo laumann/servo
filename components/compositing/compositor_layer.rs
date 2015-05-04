@@ -12,7 +12,6 @@ use geom::matrix::identity;
 use geom::point::{Point2D, TypedPoint2D};
 use geom::size::TypedSize2D;
 use geom::rect::Rect;
-use gfx::paint_task::Msg as PaintMsg;
 use layers::color::Color;
 use layers::geometry::LayerPixel;
 use layers::layers::{Layer, LayerBufferSet};
@@ -213,7 +212,7 @@ impl CompositorLayer for Layer<CompositorData> {
                    epoch,
                    self.get_pipeline_id());
             let pipeline = compositor.get_pipeline(self.get_pipeline_id());
-            let _ = pipeline.paint_chan.send(PaintMsg::UnusedBuffer(new_buffers.buffers));
+            pipeline.send_unused_buffers(new_buffers.buffers);
             return false;
         }
 
@@ -224,7 +223,7 @@ impl CompositorLayer for Layer<CompositorData> {
         let unused_buffers = self.collect_unused_buffers();
         if !unused_buffers.is_empty() { // send back unused buffers
             let pipeline = compositor.get_pipeline(self.get_pipeline_id());
-            let _ = pipeline.paint_chan.send(PaintMsg::UnusedBuffer(unused_buffers));
+            pipeline.send_unused_buffers(unused_buffers);
         }
 
         true
@@ -242,7 +241,7 @@ impl CompositorLayer for Layer<CompositorData> {
             }
 
             let pipeline = compositor.get_pipeline(self.get_pipeline_id());
-            let _ = pipeline.paint_chan.send(PaintMsg::UnusedBuffer(buffers));
+            pipeline.send_unused_buffers(buffers);
         }
     }
 

@@ -29,6 +29,7 @@ use profile::time::{self, profile};
 use skia::SkiaGrGLNativeContextRef;
 use std::borrow::ToOwned;
 use std::mem;
+use std::marker;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use util::geometry::{Au, ZERO_POINT};
@@ -38,7 +39,7 @@ use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::task::spawn_named;
 
-use rust_sessions::{Chan, Recv, Offer, Choose, Rec, Var, Z, Eps};
+use rust_sessions::*;
 
 /// Information about a hardware graphics layer that layout sends to the painting task.
 #[derive(Clone)]
@@ -79,10 +80,10 @@ Offer<PaintPermissionRevoked,
 
 // Complicated protocol for the compositor to the paint task
 pub type CompositorToPaint = Offer<UnusedBuffer, Offer<Paint, Eps>>;
-pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Var<Z>>;
+pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Eps>>;
 pub type Paint        = Recv<Vec<PaintRequest>, Var<Z>>;
 
-pub type LayoutToPaint = Offer<Recv<Vec<PaintRequest>, Var<Z>>, Eps>;
+pub type LayoutToPaint = Offer<Recv<Arc<StackingContext>, Var<Z>>, Eps>;
 
 pub enum Msg {
     PaintInit(Arc<StackingContext>),
@@ -152,7 +153,7 @@ macro_rules! native_graphics_context(
     )
 );
 
-impl<C> PaintTask<C> where C: PaintListener + Send + 'static {
+impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
     pub fn create(id: PipelineId,
                   port: Receiver<Msg>,
                   pipeline_chan: Chan<(), Rec<PipelineToPaint>>,
@@ -208,39 +209,180 @@ impl<C> PaintTask<C> where C: PaintListener + Send + 'static {
         }, ConstellationMsg::Failure(failure_msg), c);
     }
 
-// type PaintPermissionGranted = Var<Z>;
-// type PaintPermissionRevoked = Var<Z>;
-
-// pub type PipelineToPaint =
-// Offer<PaintPermissionGranted,
-// Offer<PaintPermissionRevoked,
-//       Eps>>;
-
-// // Complicated protocol for the compositor to the paint task
-// pub type CompositorToPaint = Offer<UnusedBuffer, Paint>;
-// pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Exiting>>;
-// pub type Paint        = Recv<Vec<PaintRequest>, Choose<Var<Z>, Exiting>>;
-// pub type Exiting      = Choose<Eps, Rec<Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Eps>>>>;
-
-// pub type LayoutToPaint = Var<Z>;
-
     fn run(&mut self,
            pipeline_chan: Chan<(), Rec<PipelineToPaint>>,
            layout_chan: Chan<(), Rec<LayoutToPaint>>)
     {
-        let mut pipeline_chan = pipeline_chan.enter();
+        let mut pipeline_chan = Some(pipeline_chan.enter());
+        let mut layout_chan = Some(layout_chan.enter());
+        let mut compositor_chan = None;
 
-        // enum ChanToRead {
-        //     Pipeline,
-        //     Layout,
-        //     Compositor
-        // }
+        enum ChanToRead {
+            Pipeline,
+            Layout,
+            Compositor
+        }
+
         loop {
-            // let chan_to_read = {
-            //     let sel = ChanSelect::new();
-            //     sel.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
-            //     sel.add_offer_
-            // };
+            if pipeline_chan.is_none() && layout_chan.is_none() && compositor_chan.is_none() {
+                break
+            }
+
+            let chan_to_read = {
+                let mut sel = ChanSelect::new();
+                if let Some(ref pipeline_chan) = pipeline_chan {
+                    sel.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
+                }
+                if let Some(ref layout_chan) = layout_chan {
+                    sel.add_offer_ret(&layout_chan, ChanToRead::Layout);
+                }
+                if let Some(ref compositor_chan) = compositor_chan {
+                    sel.add_offer_ret(&compositor_chan, ChanToRead::Compositor);
+                }
+                sel.wait()
+            };
+            match chan_to_read {
+                ChanToRead::Pipeline => {
+                    let (maybe_pipeline, maybe_compositor) = self.handle_pipeline(pipeline_chan.unwrap());
+                    pipeline_chan = maybe_pipeline;
+                    compositor_chan = maybe_compositor.map(|chan| chan.enter());
+                }
+                ChanToRead::Layout => {
+                    layout_chan = self.handle_layout(layout_chan.unwrap());
+                }
+                ChanToRead::Compositor => {
+                    compositor_chan = self.handle_compositor(compositor_chan.unwrap(), pipeline_chan.is_none());
+                }
+            }
+        }
+    }
+
+    fn handle_pipeline(&mut self, pipeline_chan: Chan<(PipelineToPaint, ()), PipelineToPaint>)
+        -> (Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>, Option<Chan<(), Rec<CompositorToPaint>>>)
+    {
+        offer! { pipeline_chan,
+            PaintPermissionGranted => {
+                self.paint_permission = true;
+                if self.root_stacking_context.is_some() {
+                    self.epoch.next();
+                    self.initialize_layers();
+                }
+                (Some(pipeline_chan.zero()), None)
+            },
+            PaintPermissionRevoked => {
+                self.paint_permission = false;
+                (Some(pipeline_chan.zero()), None)
+            },
+            // TODO: Add reception of CompositorToPaint channel
+            Exit => {
+                // Msg::Exit(response_channel, exit_type) => {
+                //     let should_wait_for_compositor_buffers = match exit_type {
+                //         PipelineExitType::Complete => false,
+                //         PipelineExitType::PipelineOnly => self.used_buffer_count != 0
+                //     };
+
+                //     if !should_wait_for_compositor_buffers {
+                //         debug!("PaintTask: Exiting without waiting for compositor buffers.");
+                //         response_channel.map(|channel| channel.send(()));
+                //         break;
+                //     }
+
+                //     // If we own buffers in the compositor and we are not exiting completely, wait
+                //     // for the compositor to return buffers, so that we can release them properly.
+                //     // When doing a complete exit, the compositor lets all buffers leak.
+                //     println!("PaintTask: Saw ExitMsg, {} buffers in use", self.used_buffer_count);
+                //     waiting_for_compositor_buffers_to_exit = true;
+                //     exit_response_channel = response_channel;
+                // }
+                pipeline_chan.close();
+
+                (None, None)
+            }
+        }
+    }
+
+    fn handle_layout(&mut self, layout_chan: Chan<(LayoutToPaint, ()), LayoutToPaint>)
+        -> Option<Chan<(LayoutToPaint, ()), LayoutToPaint>>
+    {
+        offer! { layout_chan,
+            PaintInit => {
+                let (c, stacking_context) = layout_chan.recv();
+                self.root_stacking_context = Some(stacking_context.clone());
+
+                if self.paint_permission {
+                    self.epoch.next();
+                    self.initialize_layers();
+                } else {
+                    debug!("PaintTask: paint ready msg");
+                    let ConstellationChan(ref mut c) = self.constellation_chan;
+                    c.send(ConstellationMsg::PainterReady(self.id)).unwrap();
+                }
+                Some(c.zero())
+            },
+            Close => {
+                layout_chan.close();
+                None
+            }
+        }
+    }
+
+    fn handle_compositor(&mut self, compositor_chan: Chan<(CompositorToPaint, ()), CompositorToPaint>, exiting: bool)
+        -> Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>
+    {
+        offer! { compositor_chan,
+            UnusedBuffer => {
+                let (c, unused_buffers) = compositor_chan.recv();
+                debug!("PaintTask: Received {} unused buffers", unused_buffers.len());
+                self.used_buffer_count -= unused_buffers.len();
+
+                for buffer in unused_buffers.into_iter().rev() {
+                    self.buffer_map.insert(native_graphics_context!(self), buffer);
+                }
+
+                if exiting && self.used_buffer_count == 0 {
+                    debug!("PaintTask: Received all loaned buffers, exiting.");
+                    c.sel2().close();
+                    None
+                } else {
+                    Some(c.sel1().zero())
+                }
+            },
+            Paint => {
+                let (c, requests) = compositor_chan.recv();
+
+                if self.paint_permission {
+                    let mut replies = Vec::new();
+                    self.compositor.set_paint_state(self.id, PaintState::Painting);
+                    for PaintRequest { buffer_requests, scale, layer_id, epoch }
+                          in requests.into_iter() {
+                        if self.epoch == epoch {
+                            self.paint(&mut replies, buffer_requests, scale, layer_id);
+                        } else {
+                            debug!("painter epoch mismatch: {:?} != {:?}", self.epoch, epoch);
+                        }
+                    }
+
+                    self.compositor.set_paint_state(self.id, PaintState::Idle);
+
+                    for reply in replies.iter() {
+                        let &(_, ref buffer_set) = reply;
+                        self.used_buffer_count += (*buffer_set).buffers.len();
+                    }
+
+                    debug!("PaintTask: returning surfaces");
+                    self.compositor.assign_painted_buffers(self.id, self.epoch, replies);
+                } else {
+                    debug!("PaintTask: paint ready msg");
+                    let ConstellationChan(ref mut c) = self.constellation_chan;
+                    c.send(ConstellationMsg::PainterReady(self.id)).unwrap();
+                    self.compositor.paint_msg_discarded();
+                }
+                Some(c.zero())
+            },
+            Close => {
+                compositor_chan.close();
+                None
+            }
         }
     }
 

@@ -16,7 +16,6 @@ use geom::rect::{Rect, TypedRect};
 use geom::scale_factor::ScaleFactor;
 use geom::size::{Size2D, TypedSize2D};
 use gfx::color;
-use gfx::paint_task::Msg as PaintMsg;
 use gfx::paint_task::PaintRequest;
 use gleam::gl::types::{GLint, GLsizei};
 use gleam::gl;
@@ -749,8 +748,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
 
         let pipeline = self.get_pipeline(pipeline_id);
-        let message = PaintMsg::UnusedBuffer(new_layer_buffer_set.buffers);
-        let _ = pipeline.paint_chan.send(message);
+        pipeline.send_unused_buffers(new_layer_buffer_set.buffers);
     }
 
     fn assign_painted_buffers_to_layer(&mut self,
@@ -1059,7 +1057,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         for (layer, buffers) in unused_buffers.into_iter() {
             if !buffers.is_empty() {
                 let pipeline = self.get_pipeline(layer.get_pipeline_id());
-                let _ = pipeline.paint_chan.send_opt(PaintMsg::UnusedBuffer(buffers));
+                pipeline.send_unused_buffers(buffers);
             }
         }
     }
@@ -1106,7 +1104,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         let mut num_paint_msgs_sent = 0;
         for (pipeline_id, requests) in pipeline_requests.into_iter() {
             num_paint_msgs_sent += 1;
-            let _ = self.get_pipeline(pipeline_id).paint_chan.send(PaintMsg::Paint(requests));
+            self.get_pipeline(pipeline_id).paint(requests)
         }
 
         self.add_outstanding_paint_msg(num_paint_msgs_sent);

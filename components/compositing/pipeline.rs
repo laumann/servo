@@ -76,7 +76,7 @@ pub struct CompositionPipeline {
 
 
 impl CompositionPipeline {
-    pub fn send_unused_buffers(&mut self, buffers: Vec<Box<LayerBuffer>>) {
+    pub fn send_unused_buffers(&self, buffers: Vec<Box<LayerBuffer>>) {
         // put and take dance
         self.with_paint_chan(|paint_chan| {
             paint_chan
@@ -86,7 +86,7 @@ impl CompositionPipeline {
         });
     }
 
-    pub fn paint(&mut self, requests: Vec<PaintRequest>) {
+    pub fn paint(&self, requests: Vec<PaintRequest>) {
         // put and take dance
         self.with_paint_chan(|paint_chan| {
             paint_chan

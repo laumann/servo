@@ -14,6 +14,7 @@ use gfx::paint_task::Msg as PaintMsg;
 use gfx::paint_task::{PaintChan, PaintTask};
 use gfx::font_cache_task::FontCacheTask;
 use layers::geometry::DevicePixel;
+use layers::layers::LayerBuffer;
 use msg::constellation_msg::{ConstellationChan, Failure, FrameId, PipelineId, SubpageId};
 use msg::constellation_msg::{LoadData, WindowSizeData, PipelineExitType, MozBrowserEvent};
 use profile::mem;
@@ -25,8 +26,10 @@ use std::sync::mpsc::{Receiver, channel};
 use url::Url;
 use util::geometry::{PagePx, ViewportPx};
 use util::opts;
-use rust_sessions::{Chan, Choose, Eps, Rec, Var, Z, session_channel};
-use std::cell::{RefCell, Cell};
+use rust_sessions::{Chan, Send, Choose, Eps, Rec, Var, Z, session_channel};
+use std::cell::RefCell;
+use std::marker;
+use gfx::paint_task::PaintRequest;
 
 type PaintPermissionGranted = Var<Z>;
 type PaintPermissionRevoked = Var<Z>;
@@ -34,6 +37,11 @@ type PaintPermissionRevoked = Var<Z>;
 pub type PipelineToPaint =
 Choose<PaintPermissionGranted,
 Choose<PaintPermissionRevoked, Eps>>;
+
+pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
+pub type UnusedBuffer = Send<Vec<Box<LayerBuffer>>, Var<Z>>;
+pub type Paint        = Send<Vec<PaintRequest>, Var<Z>>;
+
 
 /// A uniquely-identifiable pipeline of script task, layout task, and paint task.
 pub struct Pipeline {
@@ -59,11 +67,50 @@ pub struct Pipeline {
 }
 
 /// The subset of the pipeline that is needed for layer composition.
-#[derive(Clone)]
 pub struct CompositionPipeline {
     pub id: PipelineId,
     pub script_chan: ScriptControlChan,
     pub paint_chan: PaintChan,
+    pc: RefCell<Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>>,
+}
+
+
+impl CompositionPipeline {
+    pub fn send_unused_buffers(&mut self, buffers: Vec<Box<LayerBuffer>>) {
+        // put and take dance
+        self.with_paint_chan(|paint_chan| {
+            paint_chan
+                .sel1()
+                .send(buffers)
+                .zero()
+        });
+    }
+
+    pub fn paint(&mut self, requests: Vec<PaintRequest>) {
+        // put and take dance
+        self.with_paint_chan(|paint_chan| {
+            paint_chan
+                .sel2()
+                .sel1()
+                .send(requests)
+                .zero()
+        });
+    }
+
+    pub fn close(&mut self) {
+        let mut chan_ref = self.pc.borrow_mut();
+        let paint_chan = chan_ref.take().unwrap();
+        paint_chan.sel2().sel2().close();
+    }
+
+    fn with_paint_chan<F>(&self, f: F)
+        where F: FnOnce(Chan<(CompositorToPaint, ()), CompositorToPaint>)
+                        -> Chan<(CompositorToPaint, ()), CompositorToPaint>
+    {
+        let mut chan_ref = self.pc.borrow_mut();
+        let paint_chan = chan_ref.take().unwrap();
+        *chan_ref = Some(f(paint_chan))
+    }
 }
 
 impl Pipeline {
@@ -73,7 +120,7 @@ impl Pipeline {
     pub fn create<LTF,STF>(id: PipelineId,
                            parent_info: Option<(PipelineId, SubpageId)>,
                            constellation_chan: ConstellationChan,
-                           compositor_proxy: Box<CompositorProxy+'static+Send>,
+                           compositor_proxy: Box<CompositorProxy+'static+marker::Send>,
                            devtools_chan: Option<DevtoolsControlChan>,
                            image_cache_task: ImageCacheTask,
                            font_cache_task: FontCacheTask,
@@ -95,6 +142,7 @@ impl Pipeline {
         let (pipeline_chan, pipeline_port) = channel();
 
         let (pipeline_to_paint_tx, pipeline_to_paint_rx) = session_channel();
+        let (layout_to_paint_tx, layout_to_paint_rx) = session_channel();
 
         let failure = Failure {
             pipeline_id: id,
@@ -168,6 +216,7 @@ impl Pipeline {
                                   failure,
                                   script_chan.clone(),
                                   paint_chan.clone(),
+                                  layout_to_paint_tx,
                                   resource_task,
                                   image_cache_task,
                                   font_cache_task,
@@ -267,11 +316,13 @@ impl Pipeline {
             None
         } else {
             self.shared_with_compositor = true;
+            let (tx, rx) = session_channel();
 
             Some(CompositionPipeline {
                 id: self.id.clone(),
                 script_chan: self.script_chan.clone(),
                 paint_chan: self.paint_chan.clone(),
+                pc: RefCell::new(Some(tx.enter())),
             })
         }
     }

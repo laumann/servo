@@ -78,12 +78,11 @@ Offer<PaintPermissionRevoked,
       Eps>>;
 
 // Complicated protocol for the compositor to the paint task
-pub type CompositorToPaint = Offer<UnusedBuffer, Paint>;
-pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Exiting>>;
-pub type Paint        = Recv<Vec<PaintRequest>, Choose<Var<Z>, Exiting>>;
-pub type Exiting      = Choose<Eps, Rec<Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Eps>>>>;
+pub type CompositorToPaint = Offer<UnusedBuffer, Offer<Paint, Eps>>;
+pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Var<Z>>;
+pub type Paint        = Recv<Vec<PaintRequest>, Var<Z>>;
 
-pub type LayoutToPaint = Var<Z>;
+pub type LayoutToPaint = Offer<Recv<Vec<PaintRequest>, Var<Z>>, Eps>;
 
 pub enum Msg {
     PaintInit(Arc<StackingContext>),

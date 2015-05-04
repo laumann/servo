@@ -9,6 +9,7 @@ extern crate profile;
 extern crate net_traits;
 extern crate url;
 extern crate util;
+extern crate rust_sessions;
 
 // This module contains traits in layout used generically
 //   in the rest of Servo.
@@ -16,7 +17,7 @@ extern crate util;
 //   that these modules won't have to depend on layout.
 
 use gfx::font_cache_task::FontCacheTask;
-use gfx::paint_task::PaintChan;
+use gfx::paint_task::{PaintChan, PaintRequest};
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineId, PipelineExitType};
 use profile::mem;
 use profile::time;
@@ -26,6 +27,8 @@ use url::Url;
 use script_traits::{ScriptControlChan, OpaqueScriptLayoutChannel};
 use std::sync::mpsc::{Sender, Receiver};
 
+use rust_sessions::{Chan, Send, Choose, Var, Z, Eps, Rec};
+
 /// Messages sent to the layout task from the constellation
 pub enum LayoutControlMsg {
     ExitNowMsg(PipelineExitType),
@@ -34,6 +37,8 @@ pub enum LayoutControlMsg {
 
 /// A channel wrapper for constellation messages
 pub struct LayoutControlChan(pub Sender<LayoutControlMsg>);
+
+pub type LayoutToPaint = Choose<Send<Vec<PaintRequest>, Var<Z>>, Eps>;
 
 // A static method creating a layout task
 // Here to remove the compositor -> layout dependency
@@ -49,6 +54,7 @@ pub trait LayoutTaskFactory {
               failure_msg: Failure,
               script_chan: ScriptControlChan,
               paint_chan: PaintChan,
+              pc: Chan<(), Rec<LayoutToPaint>>,
               resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,
               font_cache_task: FontCacheTask,

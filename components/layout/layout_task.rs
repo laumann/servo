@@ -37,7 +37,7 @@ use gfx::display_list::{StackingContext};
 use gfx::font_cache_task::FontCacheTask;
 use gfx::paint_task::Msg as PaintMsg;
 use gfx::paint_task::{PaintChan, PaintLayer};
-use layout_traits::{LayoutControlMsg, LayoutTaskFactory};
+use layout_traits::{LayoutControlMsg, LayoutTaskFactory, LayoutToPaint};
 use log;
 use msg::compositor_msg::ScrollPolicy;
 use msg::constellation_msg::Msg as ConstellationMsg;
@@ -77,6 +77,7 @@ use util::smallvec::SmallVec;
 use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::workqueue::WorkQueue;
+use rust_sessions::{Chan, Rec};
 
 /// Mutable data belonging to the LayoutTask.
 ///
@@ -199,6 +200,7 @@ impl LayoutTaskFactory for LayoutTask {
               failure_msg: Failure,
               script_chan: ScriptControlChan,
               paint_chan: PaintChan,
+              pc: Chan<(), Rec<LayoutToPaint>>,
               resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,
               font_cache_task: FontCacheTask,

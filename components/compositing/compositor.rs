@@ -529,7 +529,11 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             self.get_or_create_pipeline_details(frame_tree.pipeline_id).pipeline = Some(rc.clone());
             rc
         } else {
-            self.get_pipeline(frame_tree.pipeline_id)
+            let details = self.get_or_create_pipeline_details(frame_tree.pipeline_id);
+            match details.pipeline {
+                Some(ref pipeline) => pipeline.clone(),
+                None => panic!("{:?} has not been sent", frame_tree.pipeline_id)
+            }
         };
         self.root_pipeline = Some(pipeline_rc.clone());
 
@@ -566,6 +570,8 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         let root_layer = CompositorData::new_layer(layer_properties,
                                                    WantsScrollEventsFlag::WantsScrollEvents,
                                                    opts::get().tile_size);
+
+        self.get_or_create_pipeline_details(pipeline_id).pipeline = Some(pipeline);
 
         // All root layers mask to bounds.
         *root_layer.masks_to_bounds.borrow_mut() = true;

@@ -982,12 +982,9 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
 
 
             let sendable_pipeline = {
-                let pipeline = self.pipeline(self.frame(root_frame_id).current);
-                if pipeline.shared_with_compositor.get() == 0 {
-                    Some(pipeline.to_sendable())
-                } else {
-                    None
-                }
+                let current_frame = self.frame(root_frame_id).current;
+                let pipeline = self.mut_pipeline(current_frame);
+                pipeline.to_sendable()
             };
 
             let (chan, port) = channel();

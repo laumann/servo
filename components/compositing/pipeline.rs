@@ -55,7 +55,7 @@ pub struct Pipeline {
     /// animations cause composites to be continually scheduled.
     pub running_animations: bool,
     pub children: Vec<FrameId>,
-    to_sendable_count: Cell<usize>,
+    pub shared_with_compositor: bool,
 }
 
 /// The subset of the pipeline that is needed for layer composition.
@@ -212,7 +212,7 @@ impl Pipeline {
             children: vec!(),
             rect: rect,
             running_animations: false,
-            to_sendable_count: Cell::new(0)
+            shared_with_compositor: false
         }
     }
 
@@ -261,13 +261,18 @@ impl Pipeline {
             LayoutControlMsg::ExitNowMsg(PipelineExitType::PipelineOnly)).unwrap();
     }
 
-    pub fn to_sendable(&self) -> CompositionPipeline {
-        self.to_sendable_count.set(self.to_sendable_count.get() + 1);
-        debug!("{:?}, to_sendable: {}", self.id, self.to_sendable_count.get());
-        CompositionPipeline {
-            id: self.id.clone(),
-            script_chan: self.script_chan.clone(),
-            paint_chan: self.paint_chan.clone(),
+    pub fn to_sendable(&mut self) -> Option<CompositionPipeline> {
+        if self.shared_with_compositor {
+            debug!("{:?} has already been shared with the compositor!", self.id);
+            None
+        } else {
+            self.shared_with_compositor = true;
+
+            Some(CompositionPipeline {
+                id: self.id.clone(),
+                script_chan: self.script_chan.clone(),
+                paint_chan: self.paint_chan.clone(),
+            })
         }
     }
 

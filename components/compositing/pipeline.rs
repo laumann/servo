@@ -101,7 +101,7 @@ impl CompositionPipeline {
         });
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&self) {
         let mut chan_ref = self.pc.borrow_mut();
         let paint_chan = chan_ref.take().unwrap();
         paint_chan.sel2().sel2().close();
@@ -112,8 +112,10 @@ impl CompositionPipeline {
                         -> Chan<(CompositorToPaint, ()), CompositorToPaint>
     {
         let mut chan_ref = self.pc.borrow_mut();
-        let paint_chan = chan_ref.take().unwrap();
-        *chan_ref = Some(f(paint_chan))
+        if chan_ref.is_some() {
+            let paint_chan = chan_ref.take().unwrap();
+            *chan_ref = Some(f(paint_chan))
+        }
     }
 }
 
@@ -289,8 +291,12 @@ impl Pipeline {
                         -> Chan<(PipelineToPaint, ()), PipelineToPaint>
     {
         let mut chan_ref = self.session_paint_chan.borrow_mut();
-        let paint_chan = chan_ref.take().unwrap();
-        *chan_ref = Some(f(paint_chan))
+        if chan_ref.is_some() {
+            let paint_chan = chan_ref.take().unwrap();
+            *chan_ref = Some(f(paint_chan))
+        } else {
+            panic!("with_paint_chan() failed.");
+        }
     }
 
     pub fn exit(&self, exit_type: PipelineExitType) {
@@ -318,8 +324,10 @@ impl Pipeline {
 
         if wait_for_layout {
             let _ = self.layout_shutdown_port.recv();
-            let _ = self.layout_shutdown_port.recv();
         }
+        let _ = self.paint_shutdown_port.recv();
+
+        debug!("pipeline {:?} completed exit", self.id);
     }
 
     pub fn freeze(&self) {
@@ -351,6 +359,7 @@ impl Pipeline {
             self.shared_with_compositor = true;
             let (for_compositor, for_paint_task) = session_channel();
 
+            debug!("{:?} sending channel to paint task", self.id);
             self.with_paint_chan(|paint_chan| {
                 paint_chan.skip2().sel1().send(for_paint_task).zero()
             });

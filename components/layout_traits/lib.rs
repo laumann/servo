@@ -17,7 +17,7 @@ extern crate rust_sessions;
 //   that these modules won't have to depend on layout.
 
 use gfx::font_cache_task::FontCacheTask;
-use gfx::paint_task::{PaintChan, PaintRequest};
+use gfx::paint_task::PaintChan;
 use gfx::display_list::StackingContext;
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineId, PipelineExitType};
 use profile::mem;

@@ -226,8 +226,10 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
             Layout,
             Compositor
         }
+        debug!("PaintTask for {:?} starting", self.id);
 
         while pipeline_chan.is_some() || layout_chan.is_some() || compositor_chan.is_some() {
+            debug!("PaintTask for {:?} looping", self.id);
             let chan_to_read = {
                 let mut sel = ChanSelect::new();
                 if let Some(ref pipeline_chan) = pipeline_chan {
@@ -245,7 +247,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                 ChanToRead::Pipeline => {
                     let (maybe_pipeline, maybe_compositor) = self.handle_pipeline(pipeline_chan.unwrap());
                     pipeline_chan = maybe_pipeline;
-                    compositor_chan = maybe_compositor.map(|chan| chan.enter());
+                    compositor_chan = compositor_chan.or_else(|| maybe_compositor.map(|c| c.enter()));
                 }
                 ChanToRead::Layout => {
                     layout_chan = self.handle_layout(layout_chan.unwrap());
@@ -255,6 +257,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                 }
             }
         }
+        debug!("PaintTask for {:?} exiting", self.id);
     }
 
     fn handle_pipeline(&mut self, pipeline_chan: Chan<(PipelineToPaint, ()), PipelineToPaint>)
@@ -276,6 +279,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
             // TODO: Add reception of CompositorToPaint channel
             PassCompositorChannel => {
                 let (c, compositor_chan) = pipeline_chan.recv();
+                debug!("Received compositor channel");
                 (Some(c.zero()), Some(compositor_chan))
             },
             Exit => {
@@ -390,6 +394,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
         }
     }
 
+    #[allow(dead_code)]
     fn start(&mut self) {
         debug!("PaintTask: beginning painting loop");
 

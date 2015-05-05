@@ -834,6 +834,11 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                     debug!("shutting down the constellation for WindowEvent::Quit");
                     let ConstellationChan(ref chan) = self.constellation_chan;
                     chan.send(ConstellationMsg::Exit).unwrap();
+                    for details in self.pipeline_details.values() {
+                        if let Some(ref pipeline) = details.pipeline {
+                            pipeline.close();
+                        }
+                    }
                     self.shutdown_state = ShutdownState::ShuttingDown;
                 }
             }
@@ -1077,9 +1082,8 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 
     fn send_viewport_rects_for_all_layers(&self) {
-        match self.scene.root {
-            Some(ref root) => self.send_viewport_rect_for_layer(root.clone()),
-            None => {},
+        if let Some(ref root) = self.scene.root {
+            self.send_viewport_rect_for_layer(root.clone());
         }
     }
 
@@ -1104,6 +1108,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         let mut num_paint_msgs_sent = 0;
         for (pipeline_id, requests) in pipeline_requests.into_iter() {
             num_paint_msgs_sent += 1;
+            debug!("Sending paint request to {:?}", pipeline_id);
             self.get_pipeline(pipeline_id).paint(requests)
         }
 

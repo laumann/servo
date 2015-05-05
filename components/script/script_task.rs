@@ -522,7 +522,7 @@ impl ScriptTask {
 
     // Return the root page in the frame tree. Panics if it doesn't exist.
     pub fn root_page(&self) -> Rc<Page> {
-        self.page.borrow().as_ref().unwrap().clone()
+        self.page.borrow().as_ref().expect("Could not borrow the root page!").clone()
     }
 
     pub fn get_cx(&self) -> *mut JSContext {
@@ -1018,7 +1018,7 @@ impl ScriptTask {
         if let Some(ref mut child_page) = page.remove(id) {
             shut_down_layout(&*child_page, exit_type);
         }
-        return false;
+        false
     }
 
     /// The entry point to document loading. Defines bindings, sets up the window and document

@@ -194,7 +194,6 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     used_buffer_count: 0,
                 };
 
-                //paint_task.start();
                 paint_task.run(pipeline_chan, layout_chan);
 
                 // Destroy all the buffers.
@@ -229,18 +228,22 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
         debug!("PaintTask for {:?} starting", self.id);
 
         while pipeline_chan.is_some() || layout_chan.is_some() || compositor_chan.is_some() {
-            debug!("PaintTask for {:?} looping", self.id);
             let chan_to_read = {
+                let mut s = String::new();
                 let mut sel = ChanSelect::new();
                 if let Some(ref pipeline_chan) = pipeline_chan {
+                    s.push_str("pipeline, ");
                     sel.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
                 }
                 if let Some(ref layout_chan) = layout_chan {
+                    s.push_str("layout_chan, ");
                     sel.add_offer_ret(&layout_chan, ChanToRead::Layout);
                 }
                 if let Some(ref compositor_chan) = compositor_chan {
+                    s.push_str("compositor, ");
                     sel.add_offer_ret(&compositor_chan, ChanToRead::Compositor);
                 }
+                debug!("PaintTask for {:?} waiting for: {}", self.id, s);
                 sel.wait()
             };
             match chan_to_read {

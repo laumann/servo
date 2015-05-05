@@ -323,8 +323,11 @@ impl Pipeline {
         paint_chan.skip2().sel2().close();
 
         if wait_for_layout {
+            debug!("{:?} waiting for layout task", self.id);
             let _ = self.layout_shutdown_port.recv();
+            debug!("{:?} layout task exited", self.id);
         }
+        debug!("{:?} waiting for paint task", self.id);
         let _ = self.paint_shutdown_port.recv();
 
         debug!("pipeline {:?} completed exit", self.id);
@@ -345,7 +348,11 @@ impl Pipeline {
         let _ = script_channel.send(
             ConstellationControlMsg::ExitPipeline(self.id,
                                                   PipelineExitType::PipelineOnly)).unwrap();
-        let _ = self.paint_chan.send(PaintMsg::Exit(None, PipelineExitType::PipelineOnly));
+
+        let mut paint_chan_ref = self.session_paint_chan.borrow_mut();
+        let paint_chan = paint_chan_ref.take().unwrap();
+        paint_chan.skip2().sel2().close();
+
         let LayoutControlChan(ref layout_channel) = self.layout_chan;
         let _ = layout_channel.send(
             LayoutControlMsg::ExitNowMsg(PipelineExitType::PipelineOnly)).unwrap();

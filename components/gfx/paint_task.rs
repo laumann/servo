@@ -223,11 +223,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
             Compositor
         }
 
-        loop {
-            if pipeline_chan.is_none() && layout_chan.is_none() && compositor_chan.is_none() {
-                break
-            }
-
+        while pipeline_chan.is_some() || layout_chan.is_some() || compositor_chan.is_some() {
             let chan_to_read = {
                 let mut sel = ChanSelect::new();
                 if let Some(ref pipeline_chan) = pipeline_chan {

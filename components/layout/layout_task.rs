@@ -56,7 +56,7 @@ use script::layout_interface::{ScriptLayoutChan, ScriptReflow, TrustedNodeAddres
 use script_traits::{ConstellationControlMsg, OpaqueScriptLayoutChannel};
 use script_traits::ScriptControlChan;
 use std::borrow::ToOwned;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::mem::transmute;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
@@ -163,6 +163,9 @@ pub struct LayoutTask {
     /// The channel on which messages can be sent to the painting task.
     pub paint_chan: PaintChan,
 
+    /// The REAL channel on which messages can be sent to the paint task.
+    pc: RefCell<Option<Chan<(LayoutToPaint, ()), LayoutToPaint>>>,
+
     /// The channel on which messages can be sent to the time profiler.
     pub time_profiler_chan: time::ProfilerChan,
 
@@ -220,6 +223,7 @@ impl LayoutTaskFactory for LayoutTask {
                                              constellation_chan,
                                              script_chan,
                                              paint_chan,
+                                             pc,
                                              resource_task,
                                              image_cache_task,
                                              font_cache_task,
@@ -273,6 +277,7 @@ impl LayoutTask {
            constellation_chan: ConstellationChan,
            script_chan: ScriptControlChan,
            paint_chan: PaintChan,
+           session_paint_chan: Chan<(), Rec<LayoutToPaint>>,
            resource_task: ResourceTask,
            image_cache_task: ImageCacheTask,
            font_cache_task: FontCacheTask,
@@ -311,6 +316,7 @@ impl LayoutTask {
             script_chan: script_chan,
             constellation_chan: constellation_chan.clone(),
             paint_chan: paint_chan,
+            pc: RefCell::new(Some(session_paint_chan.enter())),
             time_profiler_chan: time_profiler_chan,
             mem_profiler_chan: mem_profiler_chan,
             reporter_name: reporter_name,
@@ -575,8 +581,6 @@ impl LayoutTask {
     fn exit_now<'a>(&'a self,
                     possibly_locked_rw_data: &mut Option<MutexGuard<'a, LayoutTaskData>>,
                     exit_type: PipelineExitType) {
-        let (response_chan, response_port) = channel();
-
         {
             let mut rw_data = self.lock_rw_data(possibly_locked_rw_data);
             if let Some(ref mut traversal) = (&mut *rw_data).parallel_traversal {
@@ -588,8 +592,16 @@ impl LayoutTask {
         let msg = mem::ProfilerMsg::UnregisterReporter(self.reporter_name.clone());
         self.mem_profiler_chan.send(msg);
 
-        self.paint_chan.send(PaintMsg::Exit(Some(response_chan), exit_type));
-        response_port.recv().unwrap()
+        // let (response_chan, response_port) = channel();
+        // self.paint_chan.send(PaintMsg::Exit(Some(response_chan), exit_type));
+        // response_port.recv().unwrap();
+
+        self.paint_chan().sel2().close();
+    }
+
+    fn paint_chan(&self) -> Chan<(LayoutToPaint, ()), LayoutToPaint> {
+        let mut chan_ref = self.pc.borrow_mut();
+        chan_ref.take().unwrap()
     }
 
     fn handle_load_stylesheet<'a>(&'a self,
@@ -819,7 +831,8 @@ impl LayoutTask {
 
             debug!("Layout done!");
 
-            self.paint_chan.send(PaintMsg::PaintInit(stacking_context));
+            //self.paint_chan.send(PaintMsg::PaintInit(stacking_context));
+            *self.pc.borrow_mut() = Some(self.paint_chan().sel1().send(stacking_context).zero());
         });
     }
 

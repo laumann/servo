@@ -18,6 +18,7 @@ extern crate rust_sessions;
 
 use gfx::font_cache_task::FontCacheTask;
 use gfx::paint_task::{PaintChan, PaintRequest};
+use gfx::display_list::StackingContext;
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineId, PipelineExitType};
 use profile::mem;
 use profile::time;
@@ -26,6 +27,7 @@ use net_traits::image_cache_task::ImageCacheTask;
 use url::Url;
 use script_traits::{ScriptControlChan, OpaqueScriptLayoutChannel};
 use std::sync::mpsc::{Sender, Receiver};
+use std::sync::Arc;
 
 use rust_sessions::{Chan, Send, Choose, Var, Z, Eps, Rec};
 
@@ -38,7 +40,7 @@ pub enum LayoutControlMsg {
 /// A channel wrapper for constellation messages
 pub struct LayoutControlChan(pub Sender<LayoutControlMsg>);
 
-pub type LayoutToPaint = Choose<Send<Vec<PaintRequest>, Var<Z>>, Eps>;
+pub type LayoutToPaint = Choose<Send<Arc<StackingContext>, Var<Z>>, Eps>;
 
 // A static method creating a layout task
 // Here to remove the compositor -> layout dependency

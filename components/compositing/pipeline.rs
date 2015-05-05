@@ -199,6 +199,7 @@ impl Pipeline {
         PaintTask::create(id,
                           paint_port,
                           pipeline_to_paint_rx,
+                          layout_to_paint_rx,
                           compositor_proxy,
                           constellation_chan.clone(),
                           font_cache_task.clone(),
@@ -266,12 +267,26 @@ impl Pipeline {
     }
 
     pub fn grant_paint_permission(&self) {
-        let _ = self.paint_chan.send(PaintMsg::PaintPermissionGranted);
+        self.with_paint_chan(|paint_chan| {
+            paint_chan.sel1().zero()
+        });
     }
 
     pub fn revoke_paint_permission(&self) {
         debug!("pipeline revoking paint channel paint permission");
-        let _ = self.paint_chan.send(PaintMsg::PaintPermissionRevoked);
+        self.with_paint_chan(|paint_chan| {
+            paint_chan.sel2().sel1().zero()
+        });
+    }
+
+
+    fn with_paint_chan<F>(&self, f: F)
+        where F: FnOnce(Chan<(PipelineToPaint, ()), PipelineToPaint>)
+                        -> Chan<(PipelineToPaint, ()), PipelineToPaint>
+    {
+        let mut chan_ref = self.session_paint_chan.borrow_mut();
+        let paint_chan = chan_ref.take().unwrap();
+        *chan_ref = Some(f(paint_chan))
     }
 
     pub fn exit(&self, exit_type: PipelineExitType) {
@@ -279,14 +294,28 @@ impl Pipeline {
 
         // Script task handles shutting down layout, and layout handles shutting down the painter.
         // For now, if the script task has failed, we give up on clean shutdown.
+        // let ScriptControlChan(ref chan) = self.script_chan;
+        // if chan.send(ConstellationControlMsg::ExitPipeline(self.id, exit_type)).is_ok() {
+        //     // Wait until all slave tasks have terminated and run destructors
+        //     // NOTE: We don't wait for script task as we don't always own it
+        //     let _ = self.paint_shutdown_port.recv();
+        //     let _ = self.layout_shutdown_port.recv();
+        // }
+
+        // For regular shutdown we want to wait for confirmation of shutdown
+        // For irregular shutdown we just tell the tasks to quit and get on with it.
+
         let ScriptControlChan(ref chan) = self.script_chan;
-        if chan.send(ConstellationControlMsg::ExitPipeline(self.id, exit_type)).is_ok() {
-            // Wait until all slave tasks have terminated and run destructors
-            // NOTE: We don't wait for script task as we don't always own it
-            let _ = self.paint_shutdown_port.recv();
+        let wait_for_layout = chan.send(ConstellationControlMsg::ExitPipeline(self.id, exit_type)).is_ok();
+
+        let mut paint_chan_ref = self.session_paint_chan.borrow_mut();
+        let paint_chan = paint_chan_ref.take().unwrap();
+        paint_chan.sel2().sel2().close();
+
+        if wait_for_layout {
+            let _ = self.layout_shutdown_port.recv();
             let _ = self.layout_shutdown_port.recv();
         }
-
     }
 
     pub fn freeze(&self) {

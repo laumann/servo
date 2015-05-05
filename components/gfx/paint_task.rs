@@ -157,6 +157,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
     pub fn create(id: PipelineId,
                   port: Receiver<Msg>,
                   pipeline_chan: Chan<(), Rec<PipelineToPaint>>,
+                  layout_chan: Chan<(), Rec<LayoutToPaint>>,
                   compositor: C,
                   constellation_chan: ConstellationChan,
                   font_cache_task: FontCacheTask,

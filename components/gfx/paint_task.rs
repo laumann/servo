@@ -72,11 +72,13 @@ pub struct PaintRequest {
 
 type PaintPermissionGranted = Var<Z>;
 type PaintPermissionRevoked = Var<Z>;
+type PassCompositor = Recv<Chan<(), Rec<CompositorToPaint>>, Var<Z>>;
 
 pub type PipelineToPaint =
 Offer<PaintPermissionGranted,
 Offer<PaintPermissionRevoked,
-      Eps>>;
+Offer<PassCompositor,
+      Eps>>>;
 
 // Complicated protocol for the compositor to the paint task
 pub type CompositorToPaint = Offer<UnusedBuffer, Offer<Paint, Eps>>;
@@ -192,7 +194,8 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     used_buffer_count: 0,
                 };
 
-                paint_task.start();
+                //paint_task.start();
+                paint_task.run(pipeline_chan, layout_chan);
 
                 // Destroy all the buffers.
                 if let Some(ctx) = paint_task.native_graphics_context.as_ref() {
@@ -271,6 +274,10 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                 (Some(pipeline_chan.zero()), None)
             },
             // TODO: Add reception of CompositorToPaint channel
+            PassCompositorChannel => {
+                let (c, compositor_chan) = pipeline_chan.recv();
+                (Some(c.zero()), Some(compositor_chan))
+            },
             Exit => {
                 // Msg::Exit(response_channel, exit_type) => {
                 //     let should_wait_for_compositor_buffers = match exit_type {

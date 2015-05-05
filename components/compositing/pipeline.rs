@@ -26,21 +26,25 @@ use std::sync::mpsc::{Receiver, channel};
 use url::Url;
 use util::geometry::{PagePx, ViewportPx};
 use util::opts;
-use rust_sessions::{Chan, Send, Choose, Eps, Rec, Var, Z, session_channel};
+use rust_sessions::{Chan, Send, Choose, Offer, Eps, Rec, Var, Z, session_channel};
 use std::cell::RefCell;
 use std::marker;
 use gfx::paint_task::PaintRequest;
+use gfx::paint_task::CompositorToPaint as CompositorToPaintDual;
 
 type PaintPermissionGranted = Var<Z>;
 type PaintPermissionRevoked = Var<Z>;
+type PassCompositor         = Send<Chan<(), Rec<CompositorToPaintDual>>, Var<Z>>;
 
 pub type PipelineToPaint =
 Choose<PaintPermissionGranted,
-Choose<PaintPermissionRevoked, Eps>>;
+Choose<PaintPermissionRevoked,
+Choose<PassCompositor,
+       Eps>>>;
 
 pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
-pub type UnusedBuffer = Send<Vec<Box<LayerBuffer>>, Var<Z>>;
-pub type Paint        = Send<Vec<PaintRequest>, Var<Z>>;
+pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Offer<Var<Z>, Eps>>;
+pub type Paint             = Send<Vec<PaintRequest>, Var<Z>>;
 
 
 /// A uniquely-identifiable pipeline of script task, layout task, and paint task.
@@ -77,17 +81,17 @@ pub struct CompositionPipeline {
 
 impl CompositionPipeline {
     pub fn send_unused_buffers(&self, buffers: Vec<Box<LayerBuffer>>) {
-        // put and take dance
-        self.with_paint_chan(|paint_chan| {
-            paint_chan
-                .sel1()
-                .send(buffers)
-                .zero()
-        });
+        let mut chan_ref = self.pc.borrow_mut();
+        if chan_ref.is_some() {
+            let paint_chan = chan_ref.take().unwrap();
+            match paint_chan.sel1().send(buffers).offer() {
+                Ok(c) => *chan_ref = Some(c.zero()),
+                Err(c) => c.close()
+            }
+        }
     }
 
     pub fn paint(&self, requests: Vec<PaintRequest>) {
-        // put and take dance
         self.with_paint_chan(|paint_chan| {
             paint_chan
                 .sel2()
@@ -310,7 +314,7 @@ impl Pipeline {
 
         let mut paint_chan_ref = self.session_paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
-        paint_chan.sel2().sel2().close();
+        paint_chan.skip2().sel2().close();
 
         if wait_for_layout {
             let _ = self.layout_shutdown_port.recv();
@@ -345,13 +349,17 @@ impl Pipeline {
             None
         } else {
             self.shared_with_compositor = true;
-            let (tx, rx) = session_channel();
+            let (for_compositor, for_paint_task) = session_channel();
+
+            self.with_paint_chan(|paint_chan| {
+                paint_chan.skip2().sel1().send(for_paint_task).zero()
+            });
 
             Some(CompositionPipeline {
                 id: self.id.clone(),
                 script_chan: self.script_chan.clone(),
                 paint_chan: self.paint_chan.clone(),
-                pc: RefCell::new(Some(tx.enter())),
+                pc: RefCell::new(Some(for_compositor.enter())),
             })
         }
     }

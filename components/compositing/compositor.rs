@@ -521,8 +521,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                       new_constellation_chan: ConstellationChan) {
         response_chan.send(()).unwrap();
 
-        //self.root_pipeline = Some(frame_tree.pipeline.clone());
-
         let pipeline_rc = if let Some(pipeline) = pipeline {
             let rc = Rc::new(pipeline);
             self.get_or_create_pipeline_details(frame_tree.pipeline_id).pipeline = Some(rc.clone());

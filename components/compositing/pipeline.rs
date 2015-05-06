@@ -39,7 +39,7 @@ pub type PipelineToPaint =
 Choose<PaintPermissionGranted,
 Choose<PaintPermissionRevoked,
 Choose<PassCompositor,
-       Eps>>>;
+       Send<bool, Eps>>>>;
 
 pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
 pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Offer<Var<Z>, Eps>>;
@@ -312,7 +312,7 @@ impl Pipeline {
 
         let mut paint_chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
-        paint_chan.skip2().sel2().close();
+        paint_chan.skip2().sel2().send(false).close();
 
         if wait_for_layout {
             debug!("{:?} waiting for layout task", self.id);
@@ -343,7 +343,7 @@ impl Pipeline {
 
         let mut paint_chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
-        paint_chan.skip2().sel2().close();
+        paint_chan.skip2().sel2().send(true).close();
 
         let LayoutControlChan(ref layout_channel) = self.layout_chan;
         let _ = layout_channel.send(

@@ -35,8 +35,7 @@ use gfx::color;
 use gfx::display_list::{ClippingRegion, DisplayItemMetadata, DisplayList, OpaqueNode};
 use gfx::display_list::{StackingContext};
 use gfx::font_cache_task::FontCacheTask;
-use gfx::paint_task::Msg as PaintMsg;
-use gfx::paint_task::{PaintChan, PaintLayer};
+use gfx::paint_task::PaintLayer;
 use layout_traits::{LayoutControlMsg, LayoutTaskFactory, LayoutToPaint};
 use log;
 use msg::compositor_msg::ScrollPolicy;
@@ -161,10 +160,7 @@ pub struct LayoutTask {
     pub script_chan: ScriptControlChan,
 
     /// The channel on which messages can be sent to the painting task.
-    pub paint_chan: PaintChan,
-
-    /// The REAL channel on which messages can be sent to the paint task.
-    pc: RefCell<Option<Chan<(LayoutToPaint, ()), LayoutToPaint>>>,
+    paint_chan: RefCell<Option<Chan<(LayoutToPaint, ()), LayoutToPaint>>>,
 
     /// The channel on which messages can be sent to the time profiler.
     pub time_profiler_chan: time::ProfilerChan,
@@ -202,8 +198,7 @@ impl LayoutTaskFactory for LayoutTask {
               constellation_chan: ConstellationChan,
               failure_msg: Failure,
               script_chan: ScriptControlChan,
-              paint_chan: PaintChan,
-              pc: Chan<(), Rec<LayoutToPaint>>,
+              paint_chan: Chan<(), Rec<LayoutToPaint>>,
               resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,
               font_cache_task: FontCacheTask,
@@ -223,7 +218,6 @@ impl LayoutTaskFactory for LayoutTask {
                                              constellation_chan,
                                              script_chan,
                                              paint_chan,
-                                             pc,
                                              resource_task,
                                              image_cache_task,
                                              font_cache_task,
@@ -276,8 +270,7 @@ impl LayoutTask {
            pipeline_port: Receiver<LayoutControlMsg>,
            constellation_chan: ConstellationChan,
            script_chan: ScriptControlChan,
-           paint_chan: PaintChan,
-           session_paint_chan: Chan<(), Rec<LayoutToPaint>>,
+           paint_chan: Chan<(), Rec<LayoutToPaint>>,
            resource_task: ResourceTask,
            image_cache_task: ImageCacheTask,
            font_cache_task: FontCacheTask,
@@ -315,8 +308,7 @@ impl LayoutTask {
             chan: chan,
             script_chan: script_chan,
             constellation_chan: constellation_chan.clone(),
-            paint_chan: paint_chan,
-            pc: RefCell::new(Some(session_paint_chan.enter())),
+            paint_chan: RefCell::new(Some(paint_chan.enter())),
             time_profiler_chan: time_profiler_chan,
             mem_profiler_chan: mem_profiler_chan,
             reporter_name: reporter_name,
@@ -592,15 +584,11 @@ impl LayoutTask {
         let msg = mem::ProfilerMsg::UnregisterReporter(self.reporter_name.clone());
         self.mem_profiler_chan.send(msg);
 
-        // let (response_chan, response_port) = channel();
-        // self.paint_chan.send(PaintMsg::Exit(Some(response_chan), exit_type));
-        // response_port.recv().unwrap();
-
         self.paint_chan().sel2().close();
     }
 
     fn paint_chan(&self) -> Chan<(LayoutToPaint, ()), LayoutToPaint> {
-        let mut chan_ref = self.pc.borrow_mut();
+        let mut chan_ref = self.paint_chan.borrow_mut();
         chan_ref.take().unwrap()
     }
 
@@ -831,8 +819,7 @@ impl LayoutTask {
 
             debug!("Layout done!");
 
-            //self.paint_chan.send(PaintMsg::PaintInit(stacking_context));
-            *self.pc.borrow_mut() = Some(self.paint_chan().sel1().send(stacking_context).zero());
+            *self.paint_chan.borrow_mut() = Some(self.paint_chan().sel1().send(stacking_context).zero());
         });
     }
 

@@ -17,7 +17,6 @@ extern crate rust_sessions;
 //   that these modules won't have to depend on layout.
 
 use gfx::font_cache_task::FontCacheTask;
-use gfx::paint_task::PaintChan;
 use gfx::display_list::StackingContext;
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineId, PipelineExitType};
 use profile::mem;
@@ -55,7 +54,6 @@ pub trait LayoutTaskFactory {
               constellation_chan: ConstellationChan,
               failure_msg: Failure,
               script_chan: ScriptControlChan,
-              paint_chan: PaintChan,
               pc: Chan<(), Rec<LayoutToPaint>>,
               resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,

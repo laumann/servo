@@ -10,8 +10,7 @@ use script_traits::{NewLayoutInfo, ConstellationControlMsg};
 use devtools_traits::DevtoolsControlChan;
 use geom::rect::{TypedRect};
 use geom::scale_factor::ScaleFactor;
-use gfx::paint_task::Msg as PaintMsg;
-use gfx::paint_task::{PaintChan, PaintTask};
+use gfx::paint_task::PaintTask;
 use gfx::font_cache_task::FontCacheTask;
 use layers::geometry::DevicePixel;
 use layers::layers::LayerBuffer;
@@ -46,7 +45,6 @@ pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
 pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Offer<Var<Z>, Eps>>;
 pub type Paint             = Send<Vec<PaintRequest>, Var<Z>>;
 
-
 /// A uniquely-identifiable pipeline of script task, layout task, and paint task.
 pub struct Pipeline {
     pub id: PipelineId,
@@ -54,8 +52,7 @@ pub struct Pipeline {
     pub script_chan: ScriptControlChan,
     /// A channel to layout, for performing reflows and shutdown.
     pub layout_chan: LayoutControlChan,
-    pub paint_chan: PaintChan,
-    pub session_paint_chan: RefCell<Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>>,
+    pub paint_chan: RefCell<Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>>,
     pub layout_shutdown_port: Receiver<()>,
     pub paint_shutdown_port: Receiver<()>,
     /// URL corresponding to the most recently-loaded page.
@@ -74,14 +71,13 @@ pub struct Pipeline {
 pub struct CompositionPipeline {
     pub id: PipelineId,
     pub script_chan: ScriptControlChan,
-    pub paint_chan: PaintChan,
-    pc: RefCell<Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>>,
+    paint_chan: RefCell<Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>>,
 }
 
 
 impl CompositionPipeline {
     pub fn send_unused_buffers(&self, buffers: Vec<Box<LayerBuffer>>) {
-        let mut chan_ref = self.pc.borrow_mut();
+        let mut chan_ref = self.paint_chan.borrow_mut();
         if chan_ref.is_some() {
             let paint_chan = chan_ref.take().unwrap();
             match paint_chan.sel1().send(buffers).offer() {
@@ -102,7 +98,7 @@ impl CompositionPipeline {
     }
 
     pub fn close(&self) {
-        let mut chan_ref = self.pc.borrow_mut();
+        let mut chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = chan_ref.take().unwrap();
         paint_chan.sel2().sel2().close();
     }
@@ -111,10 +107,12 @@ impl CompositionPipeline {
         where F: FnOnce(Chan<(CompositorToPaint, ()), CompositorToPaint>)
                         -> Chan<(CompositorToPaint, ()), CompositorToPaint>
     {
-        let mut chan_ref = self.pc.borrow_mut();
+        let mut chan_ref = self.paint_chan.borrow_mut();
         if chan_ref.is_some() {
             let paint_chan = chan_ref.take().unwrap();
             *chan_ref = Some(f(paint_chan))
+        } else {
+            debug!("Composition{:?}: Channel is closed!", self.id);
         }
     }
 }
@@ -142,7 +140,6 @@ impl Pipeline {
                            where LTF: LayoutTaskFactory, STF:ScriptTaskFactory
     {
         let layout_pair = ScriptTaskFactory::create_layout_channel(None::<&mut STF>);
-        let (paint_port, paint_chan) = PaintChan::new();
         let (paint_shutdown_chan, paint_shutdown_port) = channel();
         let (layout_shutdown_chan, layout_shutdown_port) = channel();
         let (pipeline_chan, pipeline_port) = channel();
@@ -203,7 +200,6 @@ impl Pipeline {
         };
 
         PaintTask::create(id,
-                          paint_port,
                           pipeline_to_paint_rx,
                           layout_to_paint_rx,
                           compositor_proxy,
@@ -222,7 +218,6 @@ impl Pipeline {
                                   constellation_chan,
                                   failure,
                                   script_chan.clone(),
-                                  paint_chan.clone(),
                                   layout_to_paint_tx,
                                   resource_task,
                                   image_cache_task,
@@ -235,7 +230,6 @@ impl Pipeline {
                       parent_info,
                       script_chan,
                       LayoutControlChan(pipeline_chan),
-                      paint_chan,
                       pipeline_to_paint_tx,
                       layout_shutdown_port,
                       paint_shutdown_port,
@@ -247,8 +241,7 @@ impl Pipeline {
                parent_info: Option<(PipelineId, SubpageId)>,
                script_chan: ScriptControlChan,
                layout_chan: LayoutControlChan,
-               paint_chan: PaintChan,
-               pipeline_to_paint: Chan<(), Rec<PipelineToPaint>>,
+               paint_chan: Chan<(), Rec<PipelineToPaint>>,
                layout_shutdown_port: Receiver<()>,
                paint_shutdown_port: Receiver<()>,
                url: Url,
@@ -259,8 +252,7 @@ impl Pipeline {
             parent_info: parent_info,
             script_chan: script_chan,
             layout_chan: layout_chan,
-            paint_chan: paint_chan,
-            session_paint_chan: RefCell::new(Some(pipeline_to_paint.enter())),
+            paint_chan: RefCell::new(Some(paint_chan.enter())),
             layout_shutdown_port: layout_shutdown_port,
             paint_shutdown_port: paint_shutdown_port,
             url: url,
@@ -290,7 +282,7 @@ impl Pipeline {
         where F: FnOnce(Chan<(PipelineToPaint, ()), PipelineToPaint>)
                         -> Chan<(PipelineToPaint, ()), PipelineToPaint>
     {
-        let mut chan_ref = self.session_paint_chan.borrow_mut();
+        let mut chan_ref = self.paint_chan.borrow_mut();
         if chan_ref.is_some() {
             let paint_chan = chan_ref.take().unwrap();
             *chan_ref = Some(f(paint_chan))
@@ -318,7 +310,7 @@ impl Pipeline {
         let ScriptControlChan(ref chan) = self.script_chan;
         let wait_for_layout = chan.send(ConstellationControlMsg::ExitPipeline(self.id, exit_type)).is_ok();
 
-        let mut paint_chan_ref = self.session_paint_chan.borrow_mut();
+        let mut paint_chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
         paint_chan.skip2().sel2().close();
 
@@ -349,7 +341,7 @@ impl Pipeline {
             ConstellationControlMsg::ExitPipeline(self.id,
                                                   PipelineExitType::PipelineOnly)).unwrap();
 
-        let mut paint_chan_ref = self.session_paint_chan.borrow_mut();
+        let mut paint_chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
         paint_chan.skip2().sel2().close();
 
@@ -374,8 +366,7 @@ impl Pipeline {
             Some(CompositionPipeline {
                 id: self.id.clone(),
                 script_chan: self.script_chan.clone(),
-                paint_chan: self.paint_chan.clone(),
-                pc: RefCell::new(Some(for_compositor.enter())),
+                paint_chan: RefCell::new(Some(for_compositor.enter())),
             })
         }
     }

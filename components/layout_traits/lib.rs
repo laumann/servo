@@ -54,7 +54,7 @@ pub trait LayoutTaskFactory {
               constellation_chan: ConstellationChan,
               failure_msg: Failure,
               script_chan: ScriptControlChan,
-              pc: Chan<(), Rec<LayoutToPaint>>,
+              paint_chan: Chan<(), Rec<LayoutToPaint>>,
               resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,
               font_cache_task: FontCacheTask,

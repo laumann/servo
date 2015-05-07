@@ -379,8 +379,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             }
 
             (Msg::PaintTaskExited(pipeline_id), ShutdownState::NotShuttingDown) => {
-                if self.pipeline_details.remove(&pipeline_id).is_none() {
-                    panic!("Saw PaintTaskExited message from an unknown pipeline!");
+                match self.pipeline_details.remove(&pipeline_id) {
+                    Some(details) => {details.pipeline.map(|p| p.close()); }
+                    None => panic!("Saw PaintTaskExited message from an unknown pipeline!")
                 }
             }
 

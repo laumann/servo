@@ -25,7 +25,7 @@ use std::sync::mpsc::{Receiver, channel};
 use url::Url;
 use util::geometry::{PagePx, ViewportPx};
 use util::opts;
-use rust_sessions::{Chan, Send, Choose, Offer, Eps, Rec, Var, Z, session_channel};
+use rust_sessions::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel};
 use std::cell::RefCell;
 use std::marker;
 use gfx::paint_task::PaintRequest;
@@ -39,10 +39,10 @@ pub type PipelineToPaint =
 Choose<PaintPermissionGranted,
 Choose<PaintPermissionRevoked,
 Choose<PassCompositor,
-       Send<bool, Eps>>>>;
+       Choose<Eps, Recv<(), Eps>>>>>;
 
 pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
-pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Offer<Var<Z>, Eps>>;
+pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Var<Z>>;
 pub type Paint             = Send<Vec<PaintRequest>, Var<Z>>;
 
 /// A uniquely-identifiable pipeline of script task, layout task, and paint task.
@@ -77,14 +77,12 @@ pub struct CompositionPipeline {
 
 impl CompositionPipeline {
     pub fn send_unused_buffers(&self, buffers: Vec<Box<LayerBuffer>>) {
-        let mut chan_ref = self.paint_chan.borrow_mut();
-        if chan_ref.is_some() {
-            let paint_chan = chan_ref.take().unwrap();
-            match paint_chan.sel1().send(buffers).offer() {
-                Ok(c) => *chan_ref = Some(c.zero()),
-                Err(c) => c.close()
-            }
-        }
+        self.with_paint_chan(|paint_chan| {
+            paint_chan
+                .sel1()
+                .send(buffers)
+                .zero()
+        });
     }
 
     pub fn paint(&self, requests: Vec<PaintRequest>) {
@@ -312,7 +310,7 @@ impl Pipeline {
 
         let mut paint_chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
-        paint_chan.skip2().sel2().send(false).close();
+        let paint_chan = paint_chan.skip3().sel2(); // Normal exit
 
         if wait_for_layout {
             debug!("{:?} waiting for layout task", self.id);
@@ -320,6 +318,7 @@ impl Pipeline {
             debug!("{:?} layout task exited", self.id);
         }
         debug!("{:?} waiting for paint task", self.id);
+        paint_chan.recv().0.close();
         let _ = self.paint_shutdown_port.recv();
 
         debug!("pipeline {:?} completed exit", self.id);
@@ -343,7 +342,7 @@ impl Pipeline {
 
         let mut paint_chan_ref = self.paint_chan.borrow_mut();
         let paint_chan = paint_chan_ref.take().unwrap();
-        paint_chan.skip2().sel2().send(true).close();
+        paint_chan.skip3().sel1().close();
 
         let LayoutControlChan(ref layout_channel) = self.layout_chan;
         let _ = layout_channel.send(

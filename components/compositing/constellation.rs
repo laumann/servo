@@ -941,11 +941,11 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
         self.pipeline_to_frame_map.remove(&pipeline_id);
 
         // Inform script, compositor that this pipeline has exited.
+        self.compositor_proxy.send(CompositorMsg::PaintTaskExited(pipeline_id));
         match exit_mode {
             ExitPipelineMode::Normal => pipeline.exit(PipelineExitType::PipelineOnly),
             ExitPipelineMode::Force => pipeline.force_exit(),
         }
-        self.compositor_proxy.send(CompositorMsg::PaintTaskExited(pipeline_id));
     }
 
     // Convert a frame to a sendable form to pass to the compositor

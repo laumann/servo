@@ -78,11 +78,11 @@ pub type PipelineToPaint =
 Offer<PaintPermissionGranted,
 Offer<PaintPermissionRevoked,
 Offer<PassCompositor,
-      Recv<bool, Eps>>>>;
+      Offer<Eps, Send<(), Eps>>>>>;
 
 // Complicated protocol for the compositor to the paint task
 pub type CompositorToPaint = Offer<UnusedBuffer, Offer<Paint, Eps>>;
-pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Choose<Var<Z>, Eps>>;
+pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Var<Z>>;
 pub type Paint        = Recv<Vec<PaintRequest>, Var<Z>>;
 
 pub type LayoutToPaint = Offer<Recv<Arc<StackingContext>, Var<Z>>, Eps>;
@@ -220,7 +220,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
         let mut pipeline_chan = Some(pipeline_chan.enter());
         let mut layout_chan = Some(layout_chan.enter());
         let mut compositor_chan = None;
-        let mut force_exit = false;
+        let mut pipeline_exit_chan = None;
 
         enum ChanToRead {
             Pipeline,
@@ -249,24 +249,39 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
             };
             match chan_to_read {
                 ChanToRead::Pipeline => {
-                    let (maybe_pipeline, maybe_compositor, b) = self.handle_pipeline(pipeline_chan.unwrap());
+                    let (maybe_pipeline,
+                         maybe_compositor,
+                         maybe_exit_chan) = self.handle_pipeline(pipeline_chan.unwrap());
                     pipeline_chan = maybe_pipeline;
-                    force_exit = b;
+                    pipeline_exit_chan = maybe_exit_chan;
                     compositor_chan = compositor_chan.or_else(|| maybe_compositor.map(|c| c.enter()));
                 }
                 ChanToRead::Layout => {
                     layout_chan = self.handle_layout(layout_chan.unwrap());
                 }
                 ChanToRead::Compositor => {
-                    compositor_chan = self.handle_compositor(compositor_chan.unwrap(), pipeline_chan.is_none(), force_exit);
+                    let (maybe_compositor,
+                         maybe_exit_chan) = self.handle_compositor(compositor_chan.unwrap(),
+                                                                   pipeline_exit_chan);
+                    compositor_chan = maybe_compositor;
+                    pipeline_exit_chan = maybe_exit_chan;
                 }
             }
         }
         debug!("PaintTask for {:?} exiting", self.id);
     }
 
+    // Returns a couple of things:
+    // (1) The "original" pipeline
+    // (2) A channel to the compositor
+    // (3) The "closing" pipeline
+    //
+    // (1) and (3) are mutually exclusive - consider packing them in a Result
     fn handle_pipeline(&mut self, pipeline_chan: Chan<(PipelineToPaint, ()), PipelineToPaint>)
-        -> (Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>, Option<Chan<(), Rec<CompositorToPaint>>>, bool) {
+                       -> (Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>,
+                           Option<Chan<(), Rec<CompositorToPaint>>>,
+                           Option<Chan<(PipelineToPaint, ()), Send<(), Eps>>>)
+    {
         offer! {
             pipeline_chan,
             PaintPermissionGranted => {
@@ -275,18 +290,18 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     self.epoch.next();
                     self.initialize_layers();
                 }
-                (Some(pipeline_chan.zero()), None, false)
+                (Some(pipeline_chan.zero()), None, None)
             },
             PaintPermissionRevoked => {
                 self.paint_permission = false;
-                (Some(pipeline_chan.zero()), None, false)
+                (Some(pipeline_chan.zero()), None, None)
             },
             PassCompositorChannel => {
                 let (c, compositor_chan) = pipeline_chan.recv();
                 debug!("Received compositor channel");
-                (Some(c.zero()), Some(compositor_chan), false)
+                (Some(c.zero()), Some(compositor_chan), None)
             },
-            Exit => {
+            ForceExit => {
                 // Msg::Exit(response_channel, exit_type) => {
                 //     let should_wait_for_compositor_buffers = match exit_type {
                 //         PipelineExitType::Complete => false,
@@ -306,11 +321,31 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                 //     waiting_for_compositor_buffers_to_exit = true;
                 //     exit_response_channel = response_channel;
                 // }
-                let (pipeline_chan, force_exit) = pipeline_chan.recv();
-                debug!("force_exit: {}", force_exit);
+                // let pipeline_exit_chan = match pipeline_chan.offer() {
+                //     Ok(c) => {
+                //         debug!("Forced exit!");
+                //         c.close();
+                //         None
+                //     }
+                //     Err(c) => {
+                //         if self.used_buffer_count == {
+                //             c.send(()).close();
+                //             None
+                //         } else {
+                //             Some(c)
+                //         }
+                //     }
+                // };
                 pipeline_chan.close();
-
-                (None, None, force_exit)
+                (None, None, None)
+            },
+            Exit => {
+                (None, None, if self.used_buffer_count == 0 {
+                    pipeline_chan.send(()).close();
+                    None
+                } else {
+                    Some(pipeline_chan)
+                })
             }
         }
     }
@@ -342,9 +377,9 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
 
     fn handle_compositor(&mut self,
                          compositor_chan: Chan<(CompositorToPaint, ()), CompositorToPaint>,
-                         exiting: bool,
-                         force_exit: bool)
-                         -> Option<Chan<(CompositorToPaint, ()), CompositorToPaint>> {
+                         pipeline_exit_chan: Option<Chan<(PipelineToPaint, ()), Send<(), Eps>>>)
+                         -> (Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>,
+                             Option<Chan<(PipelineToPaint, ()), Send<(), Eps>>>){
         offer! {
             compositor_chan,
             UnusedBuffer => {
@@ -356,12 +391,12 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     self.buffer_map.insert(native_graphics_context!(self), buffer);
                 }
 
-                if force_exit || exiting && self.used_buffer_count == 0 {
-                    debug!("PaintTask: Received all loaned buffers, exiting.");
-                    c.sel2().close();
-                    None
+                if self.used_buffer_count == 0 {
+                    debug!("PaintTask: Received all loaned buffers.");
+                    pipeline_exit_chan.map(|c| c.send(()).close());
+                    (Some(c.zero()), None)
                 } else {
-                    Some(c.sel1().zero())
+                    (Some(c.zero()), pipeline_exit_chan)
                 }
             },
             Paint => {
@@ -394,11 +429,11 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     c.send(ConstellationMsg::PainterReady(self.id)).unwrap();
                     self.compositor.paint_msg_discarded();
                 }
-                Some(c.zero())
+                (Some(c.zero()), pipeline_exit_chan)
             },
             Close => {
                 compositor_chan.close();
-                None
+                (None, pipeline_exit_chan)
             }
         }
     }

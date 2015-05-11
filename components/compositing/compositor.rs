@@ -523,9 +523,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         response_chan.send(()).unwrap();
 
         let pipeline_rc = if let Some(pipeline) = pipeline {
-            let rc = Rc::new(pipeline);
-            self.get_or_create_pipeline_details(frame_tree.pipeline_id).pipeline = Some(rc.clone());
-            rc
+            Rc::new(pipeline);
         } else {
             let details = self.get_or_create_pipeline_details(frame_tree.pipeline_id);
             match details.pipeline {

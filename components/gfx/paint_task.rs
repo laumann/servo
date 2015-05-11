@@ -72,7 +72,7 @@ pub struct PaintRequest {
 
 type PaintPermissionGranted = Var<Z>;
 type PaintPermissionRevoked = Var<Z>;
-type PassCompositor = Recv<Chan<(), Rec<CompositorToPaint>>, Var<Z>>;
+type PassCompositor         = Recv<Chan<(), Rec<CompositorToPaint>>, Var<Z>>;
 
 pub type PipelineToPaint =
 Offer<PaintPermissionGranted,
@@ -82,8 +82,8 @@ Offer<PassCompositor,
 
 // Complicated protocol for the compositor to the paint task
 pub type CompositorToPaint = Offer<UnusedBuffer, Offer<Paint, Eps>>;
-pub type UnusedBuffer = Recv<Vec<Box<LayerBuffer>>, Var<Z>>;
-pub type Paint        = Recv<Vec<PaintRequest>, Var<Z>>;
+pub type UnusedBuffer      = Recv<Vec<Box<LayerBuffer>>, Var<Z>>;
+pub type Paint             = Recv<Vec<PaintRequest>, Var<Z>>;
 
 pub type LayoutToPaint = Offer<Recv<Arc<StackingContext>, Var<Z>>, Eps>;
 
@@ -205,9 +205,6 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     worker_thread.exit()
                 }
             }
-
-            debug!("paint_task: shutdown_chan send");
-            shutdown_chan.send(()).unwrap();
         }, ConstellationMsg::Failure(failure_msg), c);
     }
 

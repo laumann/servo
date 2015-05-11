@@ -309,8 +309,14 @@ impl Pipeline {
         let wait_for_layout = chan.send(ConstellationControlMsg::ExitPipeline(self.id, exit_type)).is_ok();
 
         let mut paint_chan_ref = self.paint_chan.borrow_mut();
-        let paint_chan = paint_chan_ref.take().unwrap();
-        let paint_chan = paint_chan.skip3().sel2(); // Normal exit
+        let paint_chan = paint_chan_ref.take().unwrap().skip3();
+        let paint_chan = match exit_type {
+            PipelineExitType::PipelineOnly => Some(paint_chan.sel2()),
+            PipelineExitType::Complete => {
+                paint_chan.sel1().close();
+                None
+            }
+        };
 
         if wait_for_layout {
             debug!("{:?} waiting for layout task", self.id);
@@ -318,8 +324,7 @@ impl Pipeline {
             debug!("{:?} layout task exited", self.id);
         }
         debug!("{:?} waiting for paint task", self.id);
-        paint_chan.recv().0.close();
-        let _ = self.paint_shutdown_port.recv();
+        paint_chan.map(|c| c.recv().0.close());
 
         debug!("pipeline {:?} completed exit", self.id);
     }

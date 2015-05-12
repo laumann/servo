@@ -57,7 +57,7 @@ extern crate selectors;
 extern crate string_cache;
 extern crate style;
 extern crate url;
-extern crate rust_sessions;
+extern crate session_types;
 
 // Listed first because of macro definitions
 pub mod layout_debug;

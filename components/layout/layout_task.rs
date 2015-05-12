@@ -76,7 +76,7 @@ use util::smallvec::SmallVec;
 use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::workqueue::WorkQueue;
-use rust_sessions::{Chan, Rec};
+use session_types::{Chan, Rec};
 
 /// Mutable data belonging to the LayoutTask.
 ///

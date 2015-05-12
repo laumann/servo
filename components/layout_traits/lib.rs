@@ -9,7 +9,7 @@ extern crate profile;
 extern crate net_traits;
 extern crate url;
 extern crate util;
-extern crate rust_sessions;
+extern crate session_types;
 
 // This module contains traits in layout used generically
 //   in the rest of Servo.
@@ -28,7 +28,7 @@ use script_traits::{ScriptControlChan, OpaqueScriptLayoutChannel};
 use std::sync::mpsc::{Sender, Receiver};
 use std::sync::Arc;
 
-use rust_sessions::{Chan, Send, Choose, Var, Z, Eps, Rec};
+use session_types::{Chan, Send, Choose, Var, Z, Eps, Rec};
 
 /// Messages sent to the layout task from the constellation
 pub enum LayoutControlMsg {

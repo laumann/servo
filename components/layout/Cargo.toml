@@ -64,8 +64,8 @@ git = "https://github.com/servo/rust-png"
 [dependencies.clock_ticks]
 git = "https://github.com/tomaka/clock_ticks"
 
-[dependencies.rust_sessions]
-git = "https://github.com/Munksgaard/rust-sessions.git"
+[dependencies.session_types]
+git = "https://github.com/Munksgaard/session-types.git"
 branch = "for-servo"
 
 [dependencies]

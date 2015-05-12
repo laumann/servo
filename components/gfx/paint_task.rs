@@ -39,7 +39,7 @@ use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::task::spawn_named;
 
-use rust_sessions::*;
+use session_types::*;
 
 /// Information about a hardware graphics layer that layout sends to the painting task.
 #[derive(Clone)]

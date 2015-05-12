@@ -25,7 +25,7 @@ use std::sync::mpsc::{Receiver, channel};
 use url::Url;
 use util::geometry::{PagePx, ViewportPx};
 use util::opts;
-use rust_sessions::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel};
+use session_types::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel};
 use std::cell::RefCell;
 use std::marker;
 use gfx::paint_task::PaintRequest;

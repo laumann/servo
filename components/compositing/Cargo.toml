@@ -61,8 +61,8 @@ git = "https://github.com/servo/gleam"
 [dependencies.clipboard]
 git = "https://github.com/aweinstock314/rust-x11-clipboard"
 
-[dependencies.rust_sessions]
-git = "https://github.com/Munksgaard/rust-sessions"
+[dependencies.session_types]
+git = "https://github.com/Munksgaard/session-types"
 branch = "for-servo"
 
 [dependencies]

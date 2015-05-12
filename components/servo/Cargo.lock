@@ -122,8 +122,8 @@ dependencies = [
  "net_traits 0.0.1",
  "png 0.1.0 (git+https://github.com/servo/rust-png)",
  "profile 0.0.1",
- "rust_sessions 0.0.1 (git+https://github.com/Munksgaard/rust-sessions?branch=for-servo)",
  "script_traits 0.0.1",
+ "session_types 0.0.1 (git+https://github.com/Munksgaard/session-types?branch=for-servo)",
  "time 0.1.19 (registry+https://github.com/rust-lang/crates.io-index)",
  "url 0.2.23 (registry+https://github.com/rust-lang/crates.io-index)",
  "util 0.0.1",
@@ -350,9 +350,9 @@ dependencies = [
  "plugins 0.0.1",
  "png 0.1.0 (git+https://github.com/servo/rust-png)",
  "profile 0.0.1",
- "rust_sessions 0.0.1 (git+https://github.com/Munksgaard/rust-sessions?branch=for-servo)",
  "rustc-serialize 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "script_traits 0.0.1",
+ "session_types 0.0.1 (git+https://github.com/Munksgaard/session-types?branch=for-servo)",
  "skia 0.0.20130412 (git+https://github.com/servo/skia?branch=upstream-2014-06-16)",
  "stb_image 0.1.0 (git+https://github.com/servo/rust-stb-image)",
  "string_cache 0.0.0 (git+https://github.com/servo/string-cache)",
@@ -564,11 +564,11 @@ dependencies = [
  "plugins 0.0.1",
  "png 0.1.0 (git+https://github.com/servo/rust-png)",
  "profile 0.0.1",
- "rust_sessions 0.0.1 (git+https://github.com/Munksgaard/rust-sessions?branch=for-servo)",
  "rustc-serialize 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "script 0.0.1",
  "script_traits 0.0.1",
  "selectors 0.1.0 (git+https://github.com/servo/rust-selectors)",
+ "session_types 0.0.1 (git+https://github.com/Munksgaard/session-types?branch=for-servo)",
  "string_cache 0.0.0 (git+https://github.com/servo/string-cache)",
  "string_cache_plugin 0.0.0 (git+https://github.com/servo/string-cache)",
  "style 0.0.1",
@@ -584,8 +584,8 @@ dependencies = [
  "msg 0.0.1",
  "net_traits 0.0.1",
  "profile 0.0.1",
- "rust_sessions 0.0.1 (git+https://github.com/Munksgaard/rust-sessions?branch=for-servo)",
  "script_traits 0.0.1",
+ "session_types 0.0.1 (git+https://github.com/Munksgaard/session-types?branch=for-servo)",
  "url 0.2.23 (registry+https://github.com/rust-lang/crates.io-index)",
  "util 0.0.1",
 ]
@@ -827,11 +827,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_sessions"
-version = "0.0.1"
-source = "git+https://github.com/Munksgaard/rust-sessions?branch=for-servo#351b5943d55490df4687530687b31b3a4225142d"
-
-[[package]]
 name = "rustc-serialize"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -901,6 +896,11 @@ dependencies = [
  "string_cache 0.0.0 (git+https://github.com/servo/string-cache)",
  "string_cache_plugin 0.0.0 (git+https://github.com/servo/string-cache)",
 ]
+
+[[package]]
+name = "session_types"
+version = "0.0.1"
+source = "git+https://github.com/Munksgaard/session-types?branch=for-servo#8886f3b308da9772eed69e013b560c5733c1ecde"
 
 [[package]]
 name = "skia"

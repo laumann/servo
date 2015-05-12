@@ -25,8 +25,8 @@ path = "../profile"
 [dependencies.util]
 path = "../util"
 
-[dependencies.rust_sessions]
-git = "https://github.com/Munksgaard/rust-sessions.git"
+[dependencies.session_types]
+git = "https://github.com/Munksgaard/session-types.git"
 branch = "for-servo"
 
 [dependencies]

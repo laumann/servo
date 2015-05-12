@@ -30,7 +30,7 @@ extern crate gleam;
 extern crate webdriver_traits;
 extern crate clipboard;
 #[macro_use]
-extern crate rust_sessions;
+extern crate session_types;
 
 extern crate libc;
 extern crate time;

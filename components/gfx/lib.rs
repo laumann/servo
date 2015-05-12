@@ -39,7 +39,7 @@ extern crate style;
 extern crate skia;
 extern crate time;
 extern crate url;
-#[macro_use] extern crate rust_sessions;
+#[macro_use] extern crate session_types;
 
 // Eventually we would like the shaper to be pluggable, as many operating systems have their own
 // shapers. For now, however, this is a hard dependency.

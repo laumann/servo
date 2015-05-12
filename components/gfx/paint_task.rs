@@ -430,6 +430,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
             },
             Close => {
                 compositor_chan.close();
+                debug!("Closing connection with compositor");
                 (None, pipeline_exit_chan)
             }
         }

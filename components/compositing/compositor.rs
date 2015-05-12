@@ -380,7 +380,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
             (Msg::PaintTaskExited(pipeline_id), ShutdownState::NotShuttingDown) => {
                 match self.pipeline_details.remove(&pipeline_id) {
-                    Some(details) => {details.pipeline.map(|p| p.close()); }
+                    Some(details) => { details.pipeline.map(|p| p.close()); }
                     None => panic!("Saw PaintTaskExited message from an unknown pipeline!")
                 }
             }
@@ -523,7 +523,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         response_chan.send(()).unwrap();
 
         let pipeline_rc = if let Some(pipeline) = pipeline {
-            Rc::new(pipeline);
+            Rc::new(pipeline)
         } else {
             let details = self.get_or_create_pipeline_details(frame_tree.pipeline_id);
             match details.pipeline {
@@ -831,7 +831,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                     debug!("shutting down the constellation for WindowEvent::Quit");
                     let ConstellationChan(ref chan) = self.constellation_chan;
                     chan.send(ConstellationMsg::Exit).unwrap();
-                    for details in self.pipeline_details.values() {
+
+                    // Drain the pipeline details
+                    for (_, details) in self.pipeline_details.drain() {
                         if let Some(ref pipeline) = details.pipeline {
                             pipeline.close();
                         }

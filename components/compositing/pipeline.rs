@@ -97,8 +97,10 @@ impl CompositionPipeline {
 
     pub fn close(&self) {
         let mut chan_ref = self.paint_chan.borrow_mut();
-        let paint_chan = chan_ref.take().unwrap();
-        paint_chan.sel2().sel2().close();
+        match chan_ref.take() {
+            Some(paint_chan) => paint_chan.sel2().sel2().close(),
+            None => panic!("Composition{:?}: PaintChan is closed!", self.id)
+        }
     }
 
     fn with_paint_chan<F>(&self, f: F)

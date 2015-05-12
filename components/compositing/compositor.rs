@@ -525,6 +525,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         let pipeline_rc = if let Some(pipeline) = pipeline {
             Rc::new(pipeline)
         } else {
+            // Dig out the CompositionPipeline we already have in storage
             let details = self.get_or_create_pipeline_details(frame_tree.pipeline_id);
             match details.pipeline {
                 Some(ref pipeline) => pipeline.clone(),
@@ -833,9 +834,14 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                     chan.send(ConstellationMsg::Exit).unwrap();
 
                     // Drain the pipeline details
-                    for (_, details) in self.pipeline_details.drain() {
+                    for (pipeline_id, details) in self.pipeline_details.drain() {
                         if let Some(ref pipeline) = details.pipeline {
-                            pipeline.close();
+                            // CompositionPipelines may be aliased
+                            // (because of iframes), so we make sure
+                            // to only call close() once.
+                            if pipeline_id == pipeline.id {
+                                pipeline.close();
+                            }
                         }
                     }
                     self.shutdown_state = ShutdownState::ShuttingDown;

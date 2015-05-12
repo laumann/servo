@@ -61,7 +61,7 @@ pub enum Msg {
 
     /// Requests that the layout task immediately shut down. There must be no more nodes left after
     /// this, or layout will crash.
-    ExitNow(PipelineExitType),
+    ExitNow,
 }
 
 /// Synchronous messages that script can send to layout.
@@ -197,4 +197,3 @@ impl Animation {
         self.end_time - self.start_time
     }
 }
-

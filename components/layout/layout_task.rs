@@ -408,7 +408,7 @@ impl LayoutTask {
                         self.handle_request_helper(Msg::TickAnimations, possibly_locked_rw_data)
                     }
                     LayoutControlMsg::ExitNowMsg(exit_type) => {
-                        self.handle_request_helper(Msg::ExitNow(exit_type),
+                        self.handle_request_helper(Msg::ExitNow,
                                                    possibly_locked_rw_data)
                     }
                 }
@@ -515,9 +515,9 @@ impl LayoutTask {
                 self.prepare_to_exit(response_chan, possibly_locked_rw_data);
                 return false
             },
-            Msg::ExitNow(exit_type) => {
+            Msg::ExitNow => {
                 debug!("layout: ExitNowMsg received");
-                self.exit_now(possibly_locked_rw_data, exit_type);
+                self.exit_now(possibly_locked_rw_data);
                 return false
             }
         }
@@ -555,9 +555,9 @@ impl LayoutTask {
                         self.handle_reap_layout_data(dead_layout_data)
                     }
                 }
-                Msg::ExitNow(exit_type) => {
+                Msg::ExitNow => {
                     debug!("layout task is exiting...");
-                    self.exit_now(possibly_locked_rw_data, exit_type);
+                    self.exit_now(possibly_locked_rw_data);
                     break
                 }
                 _ => {
@@ -571,8 +571,7 @@ impl LayoutTask {
     /// Shuts down the layout task now. If there are any DOM nodes left, layout will now (safely)
     /// crash.
     fn exit_now<'a>(&'a self,
-                    possibly_locked_rw_data: &mut Option<MutexGuard<'a, LayoutTaskData>>,
-                    exit_type: PipelineExitType) {
+                    possibly_locked_rw_data: &mut Option<MutexGuard<'a, LayoutTaskData>> {
         {
             let mut rw_data = self.lock_rw_data(possibly_locked_rw_data);
             if let Some(ref mut traversal) = (&mut *rw_data).parallel_traversal {

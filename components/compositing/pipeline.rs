@@ -96,6 +96,7 @@ impl CompositionPipeline {
     }
 
     pub fn close(&self) {
+        debug!("Composition{:?} closing paint chan", self.id);
         let mut chan_ref = self.paint_chan.borrow_mut();
         match chan_ref.take() {
             Some(paint_chan) => paint_chan.sel2().sel2().close(),

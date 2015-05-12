@@ -299,40 +299,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                 (Some(c.zero()), Some(compositor_chan), None)
             },
             ForceExit => {
-                // Msg::Exit(response_channel, exit_type) => {
-                //     let should_wait_for_compositor_buffers = match exit_type {
-                //         PipelineExitType::Complete => false,
-                //         PipelineExitType::PipelineOnly => self.used_buffer_count != 0
-                //     };
-
-                //     if !should_wait_for_compositor_buffers {
-                //         debug!("PaintTask: Exiting without waiting for compositor buffers.");
-                //         response_channel.map(|channel| channel.send(()));
-                //         break;
-                //     }
-
-                //     // If we own buffers in the compositor and we are not exiting completely, wait
-                //     // for the compositor to return buffers, so that we can release them properly.
-                //     // When doing a complete exit, the compositor lets all buffers leak.
-                //     println!("PaintTask: Saw ExitMsg, {} buffers in use", self.used_buffer_count);
-                //     waiting_for_compositor_buffers_to_exit = true;
-                //     exit_response_channel = response_channel;
-                // }
-                // let pipeline_exit_chan = match pipeline_chan.offer() {
-                //     Ok(c) => {
-                //         debug!("Forced exit!");
-                //         c.close();
-                //         None
-                //     }
-                //     Err(c) => {
-                //         if self.used_buffer_count == {
-                //             c.send(()).close();
-                //             None
-                //         } else {
-                //             Some(c)
-                //         }
-                //     }
-                // };
+                debug!("Forced exit");
                 pipeline_chan.close();
                 (None, None, None)
             },

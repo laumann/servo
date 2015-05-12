@@ -925,6 +925,7 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
 
     // Close all pipelines at and beneath a given frame
     fn close_pipeline(&mut self, pipeline_id: PipelineId, exit_mode: ExitPipelineMode) {
+        debug!("Closing {:?}", pipeline_id);
         let pipeline = self.pipelines.remove(&pipeline_id).unwrap();
 
         // Remove any child frames

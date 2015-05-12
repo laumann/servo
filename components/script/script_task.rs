@@ -1471,7 +1471,7 @@ fn shut_down_layout(page_tree: &Rc<Page>, exit_type: PipelineExitType) {
 
     // Destroy the layout task. If there were node leaks, layout will now crash safely.
     for chan in channels.into_iter() {
-        chan.send(layout_interface::Msg::ExitNow(exit_type)).ok();
+        chan.send(layout_interface::Msg::ExitNow).ok();
     }
 }
 

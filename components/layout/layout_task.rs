@@ -571,7 +571,7 @@ impl LayoutTask {
     /// Shuts down the layout task now. If there are any DOM nodes left, layout will now (safely)
     /// crash.
     fn exit_now<'a>(&'a self,
-                    possibly_locked_rw_data: &mut Option<MutexGuard<'a, LayoutTaskData>> {
+                    possibly_locked_rw_data: &mut Option<MutexGuard<'a, LayoutTaskData>>) {
         {
             let mut rw_data = self.lock_rw_data(possibly_locked_rw_data);
             if let Some(ref mut traversal) = (&mut *rw_data).parallel_traversal {

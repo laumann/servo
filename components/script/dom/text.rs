@@ -11,8 +11,9 @@ use dom::bindings::codegen::InheritTypes::{CharacterDataCast, TextDerived};
 use dom::bindings::codegen::InheritTypes::NodeCast;
 use dom::bindings::error::{Error, Fallible};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JSRef, OptionalRootable, RootedReference, Temporary};
-use dom::characterdata::{CharacterData, CharacterDataHelpers};
+use dom::bindings::js::{JSRef, OptionalRootable, Rootable, RootedReference};
+use dom::bindings::js::Temporary;
+use dom::characterdata::{CharacterData, CharacterDataHelpers, CharacterDataTypeId};
 use dom::document::Document;
 use dom::eventtarget::{EventTarget, EventTargetTypeId};
 use dom::node::{Node, NodeHelpers, NodeTypeId};
@@ -26,14 +27,14 @@ pub struct Text {
 
 impl TextDerived for EventTarget {
     fn is_text(&self) -> bool {
-        *self.type_id() == EventTargetTypeId::Node(NodeTypeId::Text)
+        *self.type_id() == EventTargetTypeId::Node(NodeTypeId::CharacterData(CharacterDataTypeId::Text))
     }
 }
 
 impl Text {
     fn new_inherited(text: DOMString, document: JSRef<Document>) -> Text {
         Text {
-            characterdata: CharacterData::new_inherited(NodeTypeId::Text, text, document)
+            characterdata: CharacterData::new_inherited(CharacterDataTypeId::Text, text, document)
         }
     }
 
@@ -67,11 +68,11 @@ impl<'a> TextMethods for JSRef<'a, Text> {
         let owner_doc = node.owner_doc().root();
         let new_node = owner_doc.r().CreateTextNode(new_data).root();
         // Step 6.
-        let parent = node.parent_node().root();
+        let parent = node.GetParentNode().root();
         if let Some(ref parent) = parent {
             // Step 7.
             parent.r().InsertBefore(NodeCast::from_ref(new_node.r()),
-                                    node.next_sibling().root().r())
+                                    node.GetNextSibling().root().r())
                   .unwrap();
             // TODO: Ranges.
         }
@@ -94,7 +95,7 @@ impl<'a> TextMethods for JSRef<'a, Text> {
         let nodes = first.r().inclusively_following_siblings().map(|node| node.root())
                              .take_while(|node| node.r().is_text());
         let mut text = DOMString::new();
-        for node in nodes {
+        for ref node in nodes {
             let cdata = CharacterDataCast::to_ref(node.r()).unwrap();
             text.push_str(&cdata.data());
         }

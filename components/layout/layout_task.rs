@@ -41,10 +41,10 @@ use log;
 use msg::compositor_msg::ScrollPolicy;
 use msg::constellation_msg::Msg as ConstellationMsg;
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineExitType, PipelineId};
-use profile::mem::{self, Report, ReportsChan};
-use profile::time::{self, ProfilerMetadata, profile};
-use profile::time::{TimerMetadataFrameType, TimerMetadataReflowType};
-use net_traits::{load_bytes_iter, ResourceTask};
+use profile_traits::mem::{self, Report, ReportsChan};
+use profile_traits::time::{self, ProfilerMetadata, profile};
+use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
+use net_traits::{load_bytes_iter, PendingAsyncLoad};
 use net_traits::image_cache_task::{ImageCacheTask, ImageCacheResult, ImageCacheChan};
 use script::dom::bindings::js::LayoutJS;
 use script::dom::node::{LayoutData, Node};
@@ -53,7 +53,7 @@ use script::layout_interface::{HitTestResponse, LayoutChan, LayoutRPC};
 use script::layout_interface::{MouseOverResponse, Msg, Reflow, ReflowGoal, ReflowQueryType};
 use script::layout_interface::{ScriptLayoutChan, ScriptReflow, TrustedNodeAddress};
 use script_traits::{ConstellationControlMsg, OpaqueScriptLayoutChannel};
-use script_traits::ScriptControlChan;
+use script_traits::{ScriptControlChan, StylesheetLoadResponder};
 use std::borrow::ToOwned;
 use std::cell::{Cell, RefCell};
 use std::mem::transmute;
@@ -72,7 +72,6 @@ use util::geometry::{Au, MAX_RECT};
 use util::logical_geometry::LogicalPoint;
 use util::mem::HeapSizeOf;
 use util::opts;
-use util::smallvec::SmallVec;
 use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::workqueue::WorkQueue;
@@ -171,8 +170,8 @@ pub struct LayoutTask {
     /// The name used for the task's memory reporter.
     pub reporter_name: String,
 
-    /// The channel on which messages can be sent to the resource task.
-    pub resource_task: ResourceTask,
+    /// The channel on which messages can be sent to the image cache.
+    pub image_cache_task: ImageCacheTask,
 
     /// Public interface to the font cache task.
     pub font_cache_task: FontCacheTask,
@@ -199,7 +198,6 @@ impl LayoutTaskFactory for LayoutTask {
               failure_msg: Failure,
               script_chan: ScriptControlChan,
               paint_chan: Chan<(), Rec<LayoutToPaint>>,
-              resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,
               font_cache_task: FontCacheTask,
               time_profiler_chan: time::ProfilerChan,
@@ -218,7 +216,6 @@ impl LayoutTaskFactory for LayoutTask {
                                              constellation_chan,
                                              script_chan,
                                              paint_chan,
-                                             resource_task,
                                              image_cache_task,
                                              font_cache_task,
                                              time_profiler_chan,
@@ -271,7 +268,6 @@ impl LayoutTask {
            constellation_chan: ConstellationChan,
            script_chan: ScriptControlChan,
            paint_chan: Chan<(), Rec<LayoutToPaint>>,
-           resource_task: ResourceTask,
            image_cache_task: ImageCacheTask,
            font_cache_task: FontCacheTask,
            time_profiler_chan: time::ProfilerChan,
@@ -312,7 +308,7 @@ impl LayoutTask {
             time_profiler_chan: time_profiler_chan,
             mem_profiler_chan: mem_profiler_chan,
             reporter_name: reporter_name,
-            resource_task: resource_task,
+            image_cache_task: image_cache_task.clone(),
             font_cache_task: font_cache_task,
             first_reflow: Cell::new(true),
             image_cache_receiver: image_cache_receiver,
@@ -350,7 +346,8 @@ impl LayoutTask {
                                    rw_data: &LayoutTaskData,
                                    screen_size_changed: bool,
                                    reflow_root: Option<&LayoutNode>,
-                                   url: &Url)
+                                   url: &Url,
+                                   goal: ReflowGoal)
                                    -> SharedLayoutContext {
         SharedLayoutContext {
             image_cache_task: rw_data.image_cache_task.clone(),
@@ -366,6 +363,7 @@ impl LayoutTask {
             dirty: Rect::zero(),
             generation: rw_data.generation,
             new_animations_sender: rw_data.new_animations_sender.clone(),
+            goal: goal,
         }
     }
 
@@ -404,10 +402,10 @@ impl LayoutTask {
         match port_to_read {
             PortToRead::Pipeline => {
                 match self.pipeline_port.recv().unwrap() {
-                    LayoutControlMsg::TickAnimationsMsg => {
+                    LayoutControlMsg::TickAnimations => {
                         self.handle_request_helper(Msg::TickAnimations, possibly_locked_rw_data)
                     }
-                    LayoutControlMsg::ExitNowMsg(exit_type) => {
+                    LayoutControlMsg::ExitNow(exit_type) => {
                         self.handle_request_helper(Msg::ExitNow,
                                                    possibly_locked_rw_data)
                     }
@@ -467,7 +465,8 @@ impl LayoutTask {
         let mut layout_context = self.build_shared_layout_context(&*rw_data,
                                                                   false,
                                                                   None,
-                                                                  &self.url);
+                                                                  &self.url,
+                                                                  reflow_info.goal);
 
         self.perform_post_style_recalc_layout_passes(&reflow_info,
                                                      &mut *rw_data,
@@ -487,8 +486,8 @@ impl LayoutTask {
             Msg::AddStylesheet(sheet, mq) => {
                 self.handle_add_stylesheet(sheet, mq, possibly_locked_rw_data)
             }
-            Msg::LoadStylesheet(url, mq) => {
-                self.handle_load_stylesheet(url, mq, possibly_locked_rw_data)
+            Msg::LoadStylesheet(url, mq, pending, link_element) => {
+                self.handle_load_stylesheet(url, mq, pending, link_element, possibly_locked_rw_data)
             }
             Msg::SetQuirksMode => self.handle_set_quirks_mode(possibly_locked_rw_data),
             Msg::GetRPC(response_chan) => {
@@ -516,7 +515,7 @@ impl LayoutTask {
                 return false
             },
             Msg::ExitNow => {
-                debug!("layout: ExitNowMsg received");
+                debug!("layout: ExitNow received");
                 self.exit_now(possibly_locked_rw_data);
                 return false
             }
@@ -542,7 +541,7 @@ impl LayoutTask {
     }
 
     /// Enters a quiescent state in which no new messages except for
-    /// `layout_interface::Msg::ReapLayoutData` will be processed until an `ExitNowMsg` is
+    /// `layout_interface::Msg::ReapLayoutData` will be processed until an `ExitNow` is
     /// received. A pong is immediately sent on the given response channel.
     fn prepare_to_exit<'a>(&'a self,
                            response_chan: Sender<()>,
@@ -561,7 +560,7 @@ impl LayoutTask {
                     break
                 }
                 _ => {
-                    panic!("layout: message that wasn't `ExitNowMsg` received after \
+                    panic!("layout: message that wasn't `ExitNow` received after \
                            `PrepareToExitMsg`")
                 }
             }
@@ -594,14 +593,16 @@ impl LayoutTask {
     fn handle_load_stylesheet<'a>(&'a self,
                                   url: Url,
                                   mq: MediaQueryList,
+                                  pending: PendingAsyncLoad,
+                                  responder: Box<StylesheetLoadResponder+Send>,
                                   possibly_locked_rw_data:
                                     &mut Option<MutexGuard<'a, LayoutTaskData>>) {
         // TODO: Get the actual value. http://dev.w3.org/csswg/css-syntax/#environment-encoding
         let environment_encoding = UTF_8 as EncodingRef;
 
         // TODO we don't really even need to load this if mq does not match
-        let (metadata, iter) = load_bytes_iter(&self.resource_task, url);
-        let protocol_encoding_label = metadata.charset.as_ref().map(|s| s.as_slice());
+        let (metadata, iter) = load_bytes_iter(pending);
+        let protocol_encoding_label = metadata.charset.as_ref().map(|s| &**s);
         let final_url = metadata.final_url;
 
         let sheet = Stylesheet::from_bytes_iter(iter,
@@ -609,6 +610,11 @@ impl LayoutTask {
                                                 protocol_encoding_label,
                                                 Some(environment_encoding),
                                                 Origin::Author);
+
+        //TODO: mark critical subresources as blocking load as well (#5974)
+        let ScriptControlChan(ref chan) = self.script_chan;
+        chan.send(ConstellationControlMsg::StylesheetLoadComplete(self.id, url, responder)).unwrap();
+
         self.handle_add_stylesheet(sheet, mq, possibly_locked_rw_data);
     }
 
@@ -752,11 +758,11 @@ impl LayoutTask {
         rw_data.content_boxes_response = iterator.rects;
     }
 
-    fn build_display_list_for_reflow<'a>(&'a self,
-                                         data: &Reflow,
-                                         layout_root: &mut FlowRef,
-                                         shared_layout_context: &mut SharedLayoutContext,
-                                         rw_data: &mut LayoutTaskData) {
+    fn compute_abs_pos_and_build_display_list<'a>(&'a self,
+                                                  data: &Reflow,
+                                                  layout_root: &mut FlowRef,
+                                                  shared_layout_context: &mut SharedLayoutContext,
+                                                  rw_data: &mut LayoutTaskData) {
         let writing_mode = flow::base(&**layout_root).writing_mode;
         profile(time::ProfilerCategory::LayoutDispListBuild,
                 self.profiler_metadata(),
@@ -774,7 +780,8 @@ impl LayoutTask {
 
             match rw_data.parallel_traversal {
                 None => {
-                    sequential::build_display_list_for_subtree(layout_root, shared_layout_context);
+                    sequential::build_display_list_for_subtree(layout_root,
+                                                               shared_layout_context);
                 }
                 Some(ref mut traversal) => {
                     parallel::build_display_list_for_subtree(layout_root,
@@ -785,40 +792,42 @@ impl LayoutTask {
                 }
             }
 
-            debug!("Done building display list.");
+            if data.goal == ReflowGoal::ForDisplay {
+                debug!("Done building display list.");
 
-            let root_background_color = get_root_flow_background_color(&mut **layout_root);
-            let root_size = {
-                let root_flow = flow::base(&**layout_root);
-                root_flow.position.size.to_physical(root_flow.writing_mode)
-            };
-            let mut display_list = box DisplayList::new();
-            flow::mut_base(&mut **layout_root).display_list_building_result
-                                              .add_to(&mut *display_list);
-            let paint_layer = Arc::new(PaintLayer::new(layout_root.layer_id(0),
-                                                       root_background_color,
-                                                       ScrollPolicy::Scrollable));
-            let origin = Rect(Point2D(Au(0), Au(0)), root_size);
+                let root_background_color = get_root_flow_background_color(&mut **layout_root);
+                let root_size = {
+                    let root_flow = flow::base(&**layout_root);
+                    root_flow.position.size.to_physical(root_flow.writing_mode)
+                };
+                let mut display_list = box DisplayList::new();
+                flow::mut_base(&mut **layout_root).display_list_building_result
+                                                  .add_to(&mut *display_list);
+                let paint_layer = Arc::new(PaintLayer::new(layout_root.layer_id(0),
+                                                           root_background_color,
+                                                           ScrollPolicy::Scrollable));
+                let origin = Rect(Point2D(Au(0), Au(0)), root_size);
 
-            if opts::get().dump_display_list {
-                println!("#### start printing display list.");
-                display_list.print_items(String::from_str("#"));
+                if opts::get().dump_display_list {
+                    println!("#### start printing display list.");
+                    display_list.print_items(String::from_str("#"));
+                }
+
+                let stacking_context = Arc::new(StackingContext::new(display_list,
+                                                                     &origin,
+                                                                     &origin,
+                                                                     0,
+                                                                     &Matrix2D::identity(),
+                                                                     filter::T::new(Vec::new()),
+                                                                     mix_blend_mode::T::normal,
+                                                                     Some(paint_layer)));
+
+                rw_data.stacking_context = Some(stacking_context.clone());
+
+                debug!("Layout done!");
+
+                *self.paint_chan.borrow_mut() = Some(self.paint_chan().sel1().send(stacking_context).zero());
             }
-
-            let stacking_context = Arc::new(StackingContext::new(display_list,
-                                                                 &origin,
-                                                                 &origin,
-                                                                 0,
-                                                                 &Matrix2D::identity(),
-                                                                 filter::T::new(Vec::new()),
-                                                                 mix_blend_mode::T::normal,
-                                                                 Some(paint_layer)));
-
-            rw_data.stacking_context = Some(stacking_context.clone());
-
-            debug!("Layout done!");
-
-            *self.paint_chan.borrow_mut() = Some(self.paint_chan().sel1().send(stacking_context).zero());
         });
     }
 
@@ -843,19 +852,32 @@ impl LayoutTask {
 
         let mut rw_data = self.lock_rw_data(possibly_locked_rw_data);
 
-        // TODO: Calculate the "actual viewport":
-        // http://www.w3.org/TR/css-device-adapt/#actual-viewport
-        let viewport_size = data.window_size.initial_viewport;
+        let initial_viewport = data.window_size.initial_viewport;
         let old_screen_size = rw_data.screen_size;
-        let current_screen_size = Size2D(Au::from_frac32_px(viewport_size.width.get()),
-                                         Au::from_frac32_px(viewport_size.height.get()));
+        let current_screen_size = Size2D(Au::from_f32_px(initial_viewport.width.get()),
+                                         Au::from_f32_px(initial_viewport.height.get()));
         rw_data.screen_size = current_screen_size;
 
         // Handle conditions where the entire flow tree is invalid.
         let screen_size_changed = current_screen_size != old_screen_size;
         if screen_size_changed {
-            let device = Device::new(MediaType::Screen, data.window_size.initial_viewport);
+            // Calculate the actual viewport as per DEVICE-ADAPT § 6
+            let device = Device::new(MediaType::Screen, initial_viewport);
             rw_data.stylist.set_device(device);
+
+            if let Some(constraints) = rw_data.stylist.constrain_viewport() {
+                debug!("Viewport constraints: {:?}", constraints);
+
+                // other rules are evaluated against the actual viewport
+                rw_data.screen_size = Size2D(Au::from_f32_px(constraints.size.width.get()),
+                                             Au::from_f32_px(constraints.size.height.get()));
+                let device = Device::new(MediaType::Screen, constraints.size);
+                rw_data.stylist.set_device(device);
+
+                // let the constellation know about the viewport constraints
+                let ConstellationChan(ref constellation_chan) = rw_data.constellation_chan;
+                constellation_chan.send(ConstellationMsg::ViewportConstrained(self.id, constraints)).unwrap();
+            }
         }
 
         // If the entire flow tree is invalid, then it will be reflowed anyhow.
@@ -867,11 +889,8 @@ impl LayoutTask {
             }
         }
         if needs_reflow {
-            match self.try_get_layout_root(*node) {
-                None => {}
-                Some(mut flow) => {
-                    LayoutTask::reflow_all_nodes(&mut *flow);
-                }
+            if let Some(mut flow) = self.try_get_layout_root(*node) {
+                LayoutTask::reflow_all_nodes(&mut *flow);
             }
         }
 
@@ -879,30 +898,33 @@ impl LayoutTask {
         let mut shared_layout_context = self.build_shared_layout_context(&*rw_data,
                                                                          screen_size_changed,
                                                                          Some(&node),
-                                                                         &self.url);
+                                                                         &self.url,
+                                                                         data.reflow_info.goal);
 
-        // Recalculate CSS styles and rebuild flows and fragments.
-        profile(time::ProfilerCategory::LayoutStyleRecalc,
-                self.profiler_metadata(),
-                self.time_profiler_chan.clone(),
-                || {
-            // Perform CSS selector matching and flow construction.
-            let rw_data = &mut *rw_data;
-            match rw_data.parallel_traversal {
-                None => {
-                    sequential::traverse_dom_preorder(*node, &shared_layout_context);
+        if node.is_dirty() || node.has_dirty_descendants() || rw_data.stylist.is_dirty() {
+            // Recalculate CSS styles and rebuild flows and fragments.
+            profile(time::ProfilerCategory::LayoutStyleRecalc,
+                    self.profiler_metadata(),
+                    self.time_profiler_chan.clone(),
+                    || {
+                // Perform CSS selector matching and flow construction.
+                let rw_data = &mut *rw_data;
+                match rw_data.parallel_traversal {
+                    None => {
+                        sequential::traverse_dom_preorder(*node, &shared_layout_context);
+                    }
+                    Some(ref mut traversal) => {
+                        parallel::traverse_dom_preorder(*node, &shared_layout_context, traversal);
+                    }
                 }
-                Some(ref mut traversal) => {
-                    parallel::traverse_dom_preorder(*node, &shared_layout_context, traversal);
-                }
-            }
-        });
+            });
 
-        // Retrieve the (possibly rebuilt) root flow.
-        rw_data.root_flow = Some(self.get_layout_root((*node).clone()));
+            // Retrieve the (possibly rebuilt) root flow.
+            rw_data.root_flow = Some(self.get_layout_root((*node).clone()));
 
-        // Kick off animations if any were triggered.
-        animation::process_new_animations(&mut *rw_data, self.id);
+            // Kick off animations if any were triggered.
+            animation::process_new_animations(&mut *rw_data, self.id);
+        }
 
         // Perform post-style recalculation layout passes.
         self.perform_post_style_recalc_layout_passes(&data.reflow_info,
@@ -947,7 +969,8 @@ impl LayoutTask {
         let mut layout_context = self.build_shared_layout_context(&*rw_data,
                                                                   false,
                                                                   None,
-                                                                  &self.url);
+                                                                  &self.url,
+                                                                  reflow_info.goal);
         let mut root_flow = (*rw_data.root_flow.as_ref().unwrap()).clone();
         profile(time::ProfilerCategory::LayoutStyleRecalc,
                 self.profiler_metadata(),
@@ -1011,16 +1034,10 @@ impl LayoutTask {
         });
 
         // Build the display list if necessary, and send it to the painter.
-        match data.goal {
-            ReflowGoal::ForDisplay => {
-                self.build_display_list_for_reflow(data,
-                                                   &mut root_flow,
-                                                   &mut *layout_context,
-                                                   rw_data);
-            }
-            ReflowGoal::ForScriptQuery => {}
-        }
-
+        self.compute_abs_pos_and_build_display_list(data,
+                                                    &mut root_flow,
+                                                    &mut *layout_context,
+                                                    rw_data);
         self.first_reflow.set(false);
 
         if opts::get().trace_layout {
@@ -1096,7 +1113,7 @@ impl LayoutRPC for LayoutRPCImpl {
 
     /// Requests the node containing the point of interest.
     fn hit_test(&self, _: TrustedNodeAddress, point: Point2D<f32>) -> Result<HitTestResponse, ()> {
-        let point = Point2D(Au::from_frac_px(point.x as f64), Au::from_frac_px(point.y as f64));
+        let point = Point2D(Au::from_f32_px(point.x), Au::from_f32_px(point.y));
         let resp = {
             let &LayoutRPCImpl(ref rw_data) = self;
             let rw_data = rw_data.lock().unwrap();
@@ -1123,7 +1140,7 @@ impl LayoutRPC for LayoutRPCImpl {
     fn mouse_over(&self, _: TrustedNodeAddress, point: Point2D<f32>)
                   -> Result<MouseOverResponse, ()> {
         let mut mouse_over_list: Vec<DisplayItemMetadata> = vec!();
-        let point = Point2D(Au::from_frac_px(point.x as f64), Au::from_frac_px(point.y as f64));
+        let point = Point2D(Au::from_f32_px(point.x), Au::from_f32_px(point.y));
         {
             let &LayoutRPCImpl(ref rw_data) = self;
             let rw_data = rw_data.lock().unwrap();
@@ -1183,7 +1200,7 @@ impl FragmentBorderBoxIterator for UnioningFragmentBorderBoxIterator {
     }
 
     fn should_process(&mut self, fragment: &Fragment) -> bool {
-        self.node_address == fragment.node
+        fragment.contains_node(self.node_address)
     }
 }
 
@@ -1207,7 +1224,7 @@ impl FragmentBorderBoxIterator for CollectingFragmentBorderBoxIterator {
     }
 
     fn should_process(&mut self, fragment: &Fragment) -> bool {
-        self.node_address == fragment.node
+        fragment.contains_node(self.node_address)
     }
 }
 

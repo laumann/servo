@@ -20,8 +20,8 @@ path = "../util"
 [dependencies.msg]
 path = "../msg"
 
-[dependencies.profile]
-path = "../profile"
+[dependencies.profile_traits]
+path = "../profile_traits"
 
 [dependencies.style]
 path = "../style"
@@ -61,7 +61,6 @@ git = "https://github.com/servo/rust-core-text"
 
 [dependencies.skia]
 git = "https://github.com/servo/skia"
-branch = "upstream-2014-06-16"
 
 [dependencies.script_traits]
 path = "../script_traits"
@@ -71,7 +70,6 @@ git = "https://github.com/servo/string-cache"
 
 [dependencies.session_types]
 git = "https://github.com/Munksgaard/session-types"
-branch = "for-servo"
 
 [dependencies]
 url = "0.2.16"

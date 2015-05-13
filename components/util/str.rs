@@ -7,11 +7,12 @@ use geometry::Au;
 use cssparser::{self, RGBA, Color};
 
 use libc::c_char;
+use num_lib::ToPrimitive;
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::ffi::CStr;
 use std::iter::Filter;
-use std::num::{Int, ToPrimitive};
+use std::ops::Deref;
 use std::str::{from_utf8, FromStr, Split};
 
 pub type DOMString = String;
@@ -29,7 +30,7 @@ pub fn null_str_as_empty(s: &Option<DOMString>) -> DOMString {
 
 pub fn null_str_as_empty_ref<'a>(s: &'a Option<DOMString>) -> &'a str {
     match *s {
-        Some(ref s) => s.as_slice(),
+        Some(ref s) => s,
         None => ""
     }
 }
@@ -126,10 +127,10 @@ pub fn parse_unsigned_integer<T: Iterator<Item=char>>(input: T) -> Option<u32> {
     })
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub enum LengthOrPercentageOrAuto {
     Auto,
-    Percentage(f64),
+    Percentage(f32),
     Length(Au),
 }
 
@@ -170,9 +171,9 @@ pub fn parse_length(mut value: &str) -> LengthOrPercentageOrAuto {
     value = &value[..end_index];
 
     if found_percent {
-        let result: Result<f64, _> = FromStr::from_str(value);
+        let result: Result<f32, _> = FromStr::from_str(value);
         match result {
-            Ok(number) => return LengthOrPercentageOrAuto::Percentage((number as f64) / 100.0),
+            Ok(number) => return LengthOrPercentageOrAuto::Percentage((number as f32) / 100.0),
             Err(_) => return LengthOrPercentageOrAuto::Auto,
         }
     }
@@ -231,7 +232,7 @@ pub fn parse_legacy_color(mut input: &str) -> Result<RGBA,()> {
             new_input.push(ch)
         }
     }
-    let mut input = new_input.as_slice();
+    let mut input = &*new_input;
 
     // Step 8.
     for (char_count, (index, _)) in input.char_indices().enumerate() {
@@ -242,7 +243,7 @@ pub fn parse_legacy_color(mut input: &str) -> Result<RGBA,()> {
     }
 
     // Step 9.
-    if input.char_at(0) == '#' {
+    if input.as_bytes()[0] == b'#' {
         input = &input[1..]
     }
 
@@ -323,14 +324,16 @@ pub struct LowercaseString {
 impl LowercaseString {
     pub fn new(s: &str) -> LowercaseString {
         LowercaseString {
-            inner: s.chars().map(|c| c.to_lowercase()).collect(),
+            inner: s.to_lowercase(),
         }
     }
 }
 
-impl Str for LowercaseString {
+impl Deref for LowercaseString {
+    type Target = str;
+
     #[inline]
-    fn as_slice(&self) -> &str {
+    fn deref(&self) -> &str {
         &*self.inner
     }
 }

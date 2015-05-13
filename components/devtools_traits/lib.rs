@@ -9,13 +9,12 @@
 #![crate_name = "devtools_traits"]
 #![crate_type = "rlib"]
 
-#![feature(net)]
-
 #![allow(non_snake_case)]
 
 extern crate msg;
-extern crate "rustc-serialize" as rustc_serialize;
+extern crate rustc_serialize;
 extern crate url;
+extern crate hyper;
 extern crate util;
 extern crate time;
 
@@ -23,6 +22,10 @@ use rustc_serialize::{Decodable, Decoder};
 use msg::constellation_msg::{PipelineId, WorkerId};
 use util::str::DOMString;
 use url::Url;
+
+use hyper::header::Headers;
+use hyper::http::RawStatus;
+use hyper::method::Method;
 
 use std::net::TcpStream;
 use std::sync::mpsc::{Sender, Receiver};
@@ -41,9 +44,11 @@ pub struct DevtoolsPageInfo {
 /// according to changes in the browser.
 pub enum DevtoolsControlMsg {
     AddClient(TcpStream),
+    FramerateTick(String, f64),
     NewGlobal((PipelineId, Option<WorkerId>), Sender<DevtoolScriptControlMsg>, DevtoolsPageInfo),
     SendConsoleMessage(PipelineId, ConsoleMessage),
-    ServerExitMsg
+    ServerExitMsg,
+    NetworkEventMessage(String, NetworkEvent),
 }
 
 /// Serialized JS return values
@@ -117,6 +122,7 @@ pub enum DevtoolScriptControlMsg {
     WantsLiveNotifications(PipelineId, bool),
     SetTimelineMarkers(PipelineId, Vec<TimelineMarkerType>, Sender<TimelineMarker>),
     DropTimelineMarkers(PipelineId, Vec<TimelineMarkerType>),
+    RequestAnimationFrame(PipelineId, Box<Fn(f64, ) + Send>),
 }
 
 #[derive(RustcEncodable)]
@@ -145,6 +151,12 @@ pub enum ConsoleMessage {
     // Log: message, filename, line number, column number
     LogMessage(String, String, u32, u32),
     //WarnMessage(String),
+}
+
+#[derive(Clone)]
+pub enum NetworkEvent {
+    HttpRequest(Url, Method, Headers, Option<Vec<u8>>),
+    HttpResponse(Option<Headers>, Option<RawStatus>, Option<Vec<u8>>)
 }
 
 impl TimelineMarker {

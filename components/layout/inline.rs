@@ -15,8 +15,9 @@ use layout_debug;
 use model::IntrinsicISizesContribution;
 use text;
 
-use collections::{VecDeque};
+use collections::VecDeque;
 use geom::{Point2D, Rect};
+use gfx::display_list::OpaqueNode;
 use gfx::font::FontMetrics;
 use gfx::font_context::FontContext;
 use gfx::text::glyph::CharIndex;
@@ -24,8 +25,6 @@ use gfx::text::text_run::TextRun;
 use std::cmp::max;
 use std::fmt;
 use std::mem;
-use std::num::ToPrimitive;
-use std::ops::{Add, Sub, Mul, Div, Rem, Neg, Shl, Shr, Not, BitOr, BitAnd, BitXor};
 use std::sync::Arc;
 use std::u16;
 use style::computed_values::{display, overflow_x, text_align, text_justify, text_overflow};
@@ -37,8 +36,8 @@ use util::range::{Range, RangeIndex};
 use util;
 
 // From gfxFontConstants.h in Firefox
-static FONT_SUBSCRIPT_OFFSET_RATIO: f64 = 0.20;
-static FONT_SUPERSCRIPT_OFFSET_RATIO: f64 = 0.34;
+static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
+static FONT_SUPERSCRIPT_OFFSET_RATIO: f32 = 0.34;
 
 /// `Line`s are represented as offsets into the child list, rather than
 /// as an object that "owns" fragments. Choosing a different set of line
@@ -65,7 +64,7 @@ static FONT_SUPERSCRIPT_OFFSET_RATIO: f64 = 0.34;
 /// with a float or a horizontal wall of the containing block. The block-start
 /// inline-start corner of the green zone is the same as that of the line, but
 /// the green zone can be taller and wider than the line itself.
-#[derive(RustcEncodable, Debug, Copy)]
+#[derive(RustcEncodable, Debug, Copy, Clone)]
 pub struct Line {
     /// A range of line indices that describe line breaks.
     ///
@@ -379,13 +378,15 @@ impl LineBreaker {
             let mut range = &mut scanned_text_fragment_info.range;
             strip_trailing_whitespace_if_necessary(&**scanned_text_fragment_info.run, range);
 
-            let old_fragment_inline_size = fragment.border_box.size.inline;
+            let old_fragment_inline_size = fragment.border_box.size.inline +
+                fragment.margin.inline_start_end();
             scanned_text_fragment_info.content_size.inline =
                 scanned_text_fragment_info.run.metrics_for_range(range).advance_width;
             fragment.border_box.size.inline = scanned_text_fragment_info.content_size.inline +
                 fragment.border_padding.inline_start_end();
             self.pending_line.bounds.size.inline = self.pending_line.bounds.size.inline -
-                (old_fragment_inline_size - fragment.border_box.size.inline)
+                (old_fragment_inline_size - (fragment.border_box.size.inline +
+                                             fragment.margin.inline_start_end()))
         }
     }
 
@@ -398,8 +399,8 @@ impl LineBreaker {
 
     fn new_block_size_for_line(&self, new_fragment: &Fragment, layout_context: &LayoutContext)
                                -> Au {
-        Au::max(self.pending_line.bounds.size.block,
-                self.new_inline_metrics_for_line(new_fragment, layout_context).block_size())
+        max(self.pending_line.bounds.size.block,
+            self.new_inline_metrics_for_line(new_fragment, layout_context).block_size())
     }
 
     /// Computes the position of a line that has only the provided fragment. Returns the bounding
@@ -421,7 +422,7 @@ impl LineBreaker {
         let placement_inline_size = if first_fragment.can_split() {
             Au(0)
         } else {
-            first_fragment.border_box.size.inline + self.indentation_for_pending_fragment()
+            first_fragment.margin_box_inline_size() + self.indentation_for_pending_fragment()
         };
 
         // Try to place the fragment between floats.
@@ -435,9 +436,9 @@ impl LineBreaker {
         });
 
         // Simple case: if the fragment fits, then we can stop here.
-        if line_bounds.size.inline > first_fragment.border_box.size.inline {
+        if line_bounds.size.inline > first_fragment.margin_box_inline_size() {
             debug!("LineBreaker: fragment fits on line {}", self.lines.len());
-            return (line_bounds, first_fragment.border_box.size.inline);
+            return (line_bounds, first_fragment.margin_box_inline_size());
         }
 
         // If not, but we can't split the fragment, then we'll place the line here and it will
@@ -446,7 +447,7 @@ impl LineBreaker {
             debug!("LineBreaker: line doesn't fit, but is unsplittable");
         }
 
-        (line_bounds, first_fragment.border_box.size.inline)
+        (line_bounds, first_fragment.margin_box_inline_size())
     }
 
     /// Performs float collision avoidance. This is called when adding a fragment is going to
@@ -546,7 +547,7 @@ impl LineBreaker {
         // it doesn't fit.
         let indentation = self.indentation_for_pending_fragment();
         let new_inline_size = self.pending_line.bounds.size.inline +
-            fragment.border_box.size.inline + indentation;
+            fragment.margin_box_inline_size() + indentation;
         if new_inline_size <= green_zone.inline {
             debug!("LineBreaker: fragment fits without splitting");
             self.push_fragment_to_line(layout_context, fragment, line_flush_mode);
@@ -633,7 +634,7 @@ impl LineBreaker {
                fragment.style().get_box().overflow_x) {
             (text_overflow::T::clip, _) | (_, overflow_x::T::visible) => {}
             (text_overflow::T::ellipsis, _) => {
-                need_ellipsis = fragment.border_box.size.inline > available_inline_size;
+                need_ellipsis = fragment.margin_box_inline_size() > available_inline_size;
             }
         }
 
@@ -643,7 +644,7 @@ impl LineBreaker {
             let ellipsis = fragment.transform_into_ellipsis(layout_context);
             if let Some(truncation_info) =
                     fragment.truncate_to_inline_size(available_inline_size -
-                                                     ellipsis.border_box.size.inline) {
+                                                     ellipsis.margin_box_inline_size()) {
                 let fragment = fragment.transform_with_split_info(&truncation_info.split,
                                                                   truncation_info.text_run);
                 self.push_fragment_to_line_ignoring_text_overflow(fragment, layout_context);
@@ -664,7 +665,7 @@ impl LineBreaker {
         let indentation = self.indentation_for_pending_fragment();
         self.pending_line.range.extend_by(FragmentIndex(1));
         self.pending_line.bounds.size.inline = self.pending_line.bounds.size.inline +
-            fragment.border_box.size.inline +
+            fragment.margin_box_inline_size() +
             indentation;
         self.pending_line.inline_metrics =
             self.new_inline_metrics_for_line(&fragment, layout_context);
@@ -812,9 +813,9 @@ impl InlineFlow {
         for style in fragment.inline_styles() {
             // Ignore `vertical-align` values for table cells.
             let box_style = style.get_box();
-            if box_style.display != display::T::inline &&
-                    box_style.display != display::T::block {
-                continue
+            match box_style.display {
+                display::T::inline | display::T::block | display::T::inline_block => {}
+                _ => continue,
             }
 
             match box_style.vertical_align {
@@ -895,10 +896,17 @@ impl InlineFlow {
         let slack_inline_size = max(Au(0), line.green_zone.inline - line.bounds.size.inline);
 
         // Compute the value we're going to use for `text-justify`.
-        let text_justify = if fragments.fragments.is_empty() {
+        if fragments.fragments.is_empty() {
             return
-        } else {
-            fragments.fragments[0].style().get_inheritedtext().text_justify
+        }
+        let text_justify = fragments.fragments[0].style().get_inheritedtext().text_justify;
+
+        // Translate `left` and `right` to logical directions.
+        let is_ltr = fragments.fragments[0].style().writing_mode.is_bidi_ltr();
+        let line_align = match (line_align, is_ltr) {
+            (text_align::T::left, true) | (text_align::T::right, false) => text_align::T::start,
+            (text_align::T::left, false) | (text_align::T::right, true) => text_align::T::end,
+            _ => line_align
         };
 
         // Set the fragment inline positions based on that alignment, and justify the text if
@@ -908,27 +916,30 @@ impl InlineFlow {
             text_align::T::justify if !is_last_line && text_justify != text_justify::T::none => {
                 InlineFlow::justify_inline_fragments(fragments, line, slack_inline_size)
             }
-            text_align::T::left | text_align::T::justify => {}
-            text_align::T::center => {
+            text_align::T::justify | text_align::T::start => {}
+            text_align::T::center | text_align::T::servo_center => {
                 inline_start_position_for_fragment = inline_start_position_for_fragment +
                     slack_inline_size.scale_by(0.5)
             }
-            text_align::T::right => {
+            text_align::T::end => {
                 inline_start_position_for_fragment = inline_start_position_for_fragment +
                     slack_inline_size
             }
+            text_align::T::left | text_align::T::right => unreachable!()
         }
 
-        for fragment_index in line.range.begin()..line.range.end() {
+        for fragment_index in line.range.each_index() {
             let fragment = fragments.get_mut(fragment_index.to_usize());
-            let size = fragment.border_box.size;
+            inline_start_position_for_fragment = inline_start_position_for_fragment +
+                fragment.margin.inline_start;
             fragment.border_box = LogicalRect::new(fragment.style.writing_mode,
                                                    inline_start_position_for_fragment,
                                                    fragment.border_box.start.b,
-                                                   size.inline,
-                                                   size.block);
+                                                   fragment.border_box.size.inline,
+                                                   fragment.border_box.size.block);
             fragment.update_late_computed_inline_position_if_necessary();
-            inline_start_position_for_fragment = inline_start_position_for_fragment + size.inline;
+            inline_start_position_for_fragment = inline_start_position_for_fragment +
+                fragment.border_box.size.inline + fragment.margin.inline_end;
         }
     }
 
@@ -959,7 +970,7 @@ impl InlineFlow {
         }
 
         // Then distribute all the space across the expansion opportunities.
-        let space_per_expansion_opportunity = slack_inline_size.to_subpx() /
+        let space_per_expansion_opportunity = slack_inline_size.to_f64_px() /
             (expansion_opportunities as f64);
         for fragment_index in line.range.each_index() {
             let fragment = fragments.get_mut(fragment_index.to_usize());
@@ -1008,7 +1019,7 @@ impl InlineFlow {
                                     line_distance_from_flow_block_start: Au,
                                     baseline_distance_from_block_start: Au,
                                     largest_depth_below_baseline: Au) {
-        for fragment_index in line.range.begin()..line.range.end() {
+        for fragment_index in line.range.each_index() {
             // If any of the inline styles say `top` or `bottom`, adjust the vertical align
             // appropriately.
             //
@@ -1019,12 +1030,14 @@ impl InlineFlow {
             for style in fragment.inline_styles() {
                 match (style.get_box().display, style.get_box().vertical_align) {
                     (display::T::inline, vertical_align::T::top) |
-                    (display::T::block, vertical_align::T::top) => {
+                    (display::T::block, vertical_align::T::top) |
+                    (display::T::inline_block, vertical_align::T::top) => {
                         vertical_align = vertical_align::T::top;
                         break
                     }
                     (display::T::inline, vertical_align::T::bottom) |
-                    (display::T::block, vertical_align::T::bottom) => {
+                    (display::T::block, vertical_align::T::bottom) |
+                    (display::T::inline_block, vertical_align::T::bottom) => {
                         vertical_align = vertical_align::T::bottom;
                         break
                     }
@@ -1080,10 +1093,10 @@ impl InlineFlow {
         for frag in self.fragments.fragments.iter() {
             match frag.inline_context {
                 Some(ref inline_context) => {
-                    for style in inline_context.styles.iter() {
-                        let font_style = style.get_font_arc();
+                    for node in inline_context.nodes.iter() {
+                        let font_style = node.style.get_font_arc();
                         let font_metrics = text::font_metrics_for_style(font_context, font_style);
-                        let line_height = text::line_height_from_style(&**style, &font_metrics);
+                        let line_height = text::line_height_from_style(&*node.style, &font_metrics);
                         let inline_metrics = InlineMetrics::from_font_metrics(&font_metrics,
                                                                               line_height);
                         block_size_above_baseline = max(block_size_above_baseline,
@@ -1197,7 +1210,8 @@ impl Flow for InlineFlow {
         {
             let this = &mut *self;
             for fragment in this.fragments.fragments.iter_mut() {
-                fragment.compute_border_and_padding(inline_size);
+                let border_collapse = fragment.style.get_inheritedtable().border_collapse;
+                fragment.compute_border_and_padding(inline_size, border_collapse);
                 fragment.compute_block_direction_margins(inline_size);
                 fragment.compute_inline_direction_margins(inline_size);
                 fragment.assign_replaced_inline_size_if_necessary(inline_size);
@@ -1285,7 +1299,7 @@ impl Flow for InlineFlow {
             let (mut largest_block_size_for_top_fragments,
                  mut largest_block_size_for_bottom_fragments) = (Au(0), Au(0));
 
-            for fragment_index in line.range.begin()..line.range.end() {
+            for fragment_index in line.range.each_index() {
                 let fragment = &mut self.fragments.fragments[fragment_index.to_usize()];
 
                 let InlineMetrics {
@@ -1384,7 +1398,7 @@ impl Flow for InlineFlow {
             kid.assign_block_size_for_inorder_child_if_necessary(layout_context, thread_id);
         }
 
-        self.base.position.size.block = match self.lines.as_slice().last() {
+        self.base.position.size.block = match self.lines.last() {
             Some(ref last_line) => last_line.bounds.start.b + last_line.bounds.size.block,
             None => Au(0),
         };
@@ -1467,7 +1481,7 @@ impl Flow for InlineFlow {
                              &fragment.stacking_relative_border_box(stacking_relative_position,
                                                                     relative_containing_block_size,
                                                                     relative_containing_block_mode,
-                                                                    CoordinateSystem::Parent)
+                                                                    CoordinateSystem::Own)
                                       .translate(stacking_context_position))
         }
     }
@@ -1486,23 +1500,34 @@ impl fmt::Debug for InlineFlow {
 }
 
 #[derive(Clone)]
+pub struct InlineFragmentNodeInfo {
+    pub address: OpaqueNode,
+    pub style: Arc<ComputedValues>,
+}
+
+#[derive(Clone)]
 pub struct InlineFragmentContext {
-    pub styles: Vec<Arc<ComputedValues>>,
+    pub nodes: Vec<InlineFragmentNodeInfo>,
 }
 
 impl InlineFragmentContext {
     pub fn new() -> InlineFragmentContext {
         InlineFragmentContext {
-            styles: vec!()
+            nodes: vec!(),
         }
     }
 
+    #[inline]
+    pub fn contains_node(&self, node_address: OpaqueNode) -> bool {
+        self.nodes.iter().position(|node| node.address == node_address).is_some()
+    }
+
     fn ptr_eq(&self, other: &InlineFragmentContext) -> bool {
-        if self.styles.len() != other.styles.len() {
+        if self.nodes.len() != other.nodes.len() {
             return false
         }
-        for (this_style, other_style) in self.styles.iter().zip(other.styles.iter()) {
-            if !util::arc_ptr_eq(this_style, other_style) {
+        for (this_node, other_node) in self.nodes.iter().zip(other.nodes.iter()) {
+            if !util::arc_ptr_eq(&this_node.style, &other_node.style) {
                 return false
             }
         }
@@ -1555,12 +1580,17 @@ impl InlineMetrics {
 
     /// Calculates inline metrics from font metrics and line block-size per CSS 2.1 § 10.8.1.
     #[inline]
-    pub fn from_block_height(font_metrics: &FontMetrics, block_height: Au) -> InlineMetrics {
-        let leading = block_height - (font_metrics.ascent + font_metrics.descent);
+    pub fn from_block_height(font_metrics: &FontMetrics,
+                             block_height: Au,
+                             block_start_margin: Au,
+                             block_end_margin: Au)
+                             -> InlineMetrics {
+        let leading = block_height + block_start_margin + block_end_margin -
+            (font_metrics.ascent + font_metrics.descent);
         InlineMetrics {
             block_size_above_baseline: font_metrics.ascent + leading.scale_by(0.5),
             depth_below_baseline: font_metrics.descent + leading.scale_by(0.5),
-            ascent: font_metrics.ascent + leading.scale_by(0.5),
+            ascent: font_metrics.ascent + leading.scale_by(0.5) - block_start_margin,
         }
     }
 
@@ -1570,10 +1600,10 @@ impl InlineMetrics {
 
     pub fn max(&self, other: &InlineMetrics) -> InlineMetrics {
         InlineMetrics {
-            block_size_above_baseline: Au::max(self.block_size_above_baseline,
-                                               other.block_size_above_baseline),
-            depth_below_baseline: Au::max(self.depth_below_baseline, other.depth_below_baseline),
-            ascent: Au::max(self.ascent, other.ascent),
+            block_size_above_baseline: max(self.block_size_above_baseline,
+                                           other.block_size_above_baseline),
+            depth_below_baseline: max(self.depth_below_baseline, other.depth_below_baseline),
+            ascent: max(self.ascent, other.ascent),
         }
     }
 }

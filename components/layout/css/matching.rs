@@ -14,6 +14,7 @@ use incremental::{self, RestyleDamage};
 use opaque_node::OpaqueNodeMethods;
 use wrapper::{LayoutElement, LayoutNode, TLayoutNode};
 
+use script::dom::characterdata::CharacterDataTypeId;
 use script::dom::node::NodeTypeId;
 use script::layout_interface::Animation;
 use selectors::bloom::BloomFilter;
@@ -27,13 +28,14 @@ use std::slice::Iter;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use string_cache::{Atom, Namespace};
-use style::node::{TElement, TNode};
+use style::node::{TElement, TElementAttributes, TNode};
 use style::properties::{ComputedValues, cascade};
 use style::selector_matching::{Stylist, DeclarationBlock};
 use util::arc_ptr_eq;
 use util::cache::{LRUCache, SimpleHashCache};
 use util::opts;
-use util::smallvec::{SmallVec, SmallVec16};
+use util::smallvec::SmallVec16;
+use util::vec::ForgetfulSink;
 
 pub struct ApplicableDeclarations {
     pub normal: SmallVec16<DeclarationBlock>,
@@ -119,7 +121,7 @@ impl<'a> Eq for ApplicableDeclarationsCacheQuery<'a> {}
 
 impl<'a> PartialEq<ApplicableDeclarationsCacheEntry> for ApplicableDeclarationsCacheQuery<'a> {
     fn eq(&self, other: &ApplicableDeclarationsCacheEntry) -> bool {
-        let other_as_query = ApplicableDeclarationsCacheQuery::new(other.declarations.as_slice());
+        let other_as_query = ApplicableDeclarationsCacheQuery::new(&other.declarations);
         self.eq(&other_as_query)
     }
 }
@@ -263,7 +265,7 @@ impl StyleSharingCandidate {
             local_name: element.get_local_name().clone(),
             class: element.get_attr(&ns!(""), &atom!("class"))
                           .map(|string| string.to_owned()),
-            link: element.get_link().is_some(),
+            link: element.is_link(),
             namespace: (*element.get_namespace()).clone(),
             common_style_affecting_attributes:
                    create_common_style_affecting_attributes_from_element(&element)
@@ -279,7 +281,7 @@ impl StyleSharingCandidate {
         match (&self.class, element.get_attr(&ns!(""), &atom!("class"))) {
             (&None, Some(_)) | (&Some(_), None) => return false,
             (&Some(ref this_class), Some(element_class)) if
-                    element_class != this_class.as_slice() => {
+                    element_class != &**this_class => {
                 return false
             }
             (&Some(_), Some(_)) | (&None, None) => {}
@@ -287,6 +289,12 @@ impl StyleSharingCandidate {
 
         if *element.get_namespace() != self.namespace {
             return false
+        }
+
+        let mut matching_rules = ForgetfulSink::new();
+        element.synthesize_presentational_hints_for_legacy_attributes(&mut matching_rules);
+        if !matching_rules.is_empty() {
+            return false;
         }
 
         // FIXME(pcwalton): It's probably faster to iterate over all the element's attributes and
@@ -325,7 +333,7 @@ impl StyleSharingCandidate {
             }
         }
 
-        if element.get_link().is_some() != self.link {
+        if element.is_link() != self.link {
             return false
         }
 
@@ -669,7 +677,7 @@ impl<'ln> MatchMethods for LayoutNode<'ln> {
             &mut None => panic!("no layout data"),
             &mut Some(ref mut layout_data) => {
                 match self.type_id() {
-                    Some(NodeTypeId::Text) => {
+                    Some(NodeTypeId::CharacterData(CharacterDataTypeId::Text)) => {
                         // Text nodes get a copy of the parent style. This ensures
                         // that during fragment construction any non-inherited
                         // CSS properties (such as vertical-align) are correctly
@@ -681,7 +689,7 @@ impl<'ln> MatchMethods for LayoutNode<'ln> {
                         let mut damage = self.cascade_node_pseudo_element(
                             layout_context,
                             parent_style,
-                            applicable_declarations.normal.as_slice(),
+                            &applicable_declarations.normal,
                             &mut layout_data.shared_data.style,
                             applicable_declarations_cache,
                             new_animations_sender,

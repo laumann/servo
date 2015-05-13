@@ -8,14 +8,16 @@ use dom::attr::AttrHelpers;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use dom::bindings::codegen::Bindings::EventBinding::EventMethods;
+use dom::bindings::codegen::Bindings::KeyboardEventBinding::KeyboardEventMethods;
 use dom::bindings::codegen::Bindings::HTMLInputElementBinding;
 use dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLElementCast, HTMLInputElementCast, NodeCast};
 use dom::bindings::codegen::InheritTypes::{HTMLInputElementDerived, HTMLFieldSetElementDerived, EventTargetCast};
 use dom::bindings::codegen::InheritTypes::KeyboardEventCast;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{Comparable, JSRef, LayoutJS, Root, Temporary, OptionalRootable};
-use dom::bindings::js::{ResultRootable, RootedReference, MutNullableJS};
+use dom::bindings::js::{JS, JSRef, LayoutJS, MutNullableHeap};
+use dom::bindings::js::{OptionalRootable, ResultRootable, Root, Rootable};
+use dom::bindings::js::{RootedReference, Temporary};
 use dom::document::{Document, DocumentHelpers};
 use dom::element::{AttributeHandlers, Element};
 use dom::element::{RawLayoutElementHelpers, ActivationElementHelpers};
@@ -33,6 +35,7 @@ use dom::window::WindowHelpers;
 use textinput::TextInput;
 use textinput::KeyReaction::{TriggerDefaultAction, DispatchInput, Nothing};
 use textinput::Lines::Single;
+use msg::constellation_msg::ConstellationChan;
 
 use util::str::DOMString;
 use string_cache::Atom;
@@ -46,7 +49,7 @@ const DEFAULT_SUBMIT_VALUE: &'static str = "Submit";
 const DEFAULT_RESET_VALUE: &'static str = "Reset";
 
 #[jstraceable]
-#[derive(PartialEq, Copy)]
+#[derive(PartialEq, Copy, Clone)]
 #[allow(dead_code)]
 enum InputType {
     InputSubmit,
@@ -70,7 +73,7 @@ pub struct HTMLInputElement {
     indeterminate: Cell<bool>,
     value_changed: Cell<bool>,
     size: Cell<u32>,
-    textinput: DOMRefCell<TextInput>,
+    textinput: DOMRefCell<TextInput<ConstellationChan>>,
     activation_state: DOMRefCell<InputActivationState>,
 }
 
@@ -80,7 +83,7 @@ struct InputActivationState {
     indeterminate: bool,
     checked: bool,
     checked_changed: bool,
-    checked_radio: MutNullableJS<HTMLInputElement>,
+    checked_radio: MutNullableHeap<JS<HTMLInputElement>>,
     // In case mutability changed
     was_mutable: bool,
     // In case the type changed
@@ -120,7 +123,7 @@ impl HTMLInputElement {
             checked_changed: Cell::new(false),
             value_changed: Cell::new(false),
             size: Cell::new(DEFAULT_INPUT_SIZE),
-            textinput: DOMRefCell::new(TextInput::new(Single, "".to_owned(), Some(chan))),
+            textinput: DOMRefCell::new(TextInput::new(Single, "".to_owned(), chan)),
             activation_state: DOMRefCell::new(InputActivationState::new())
         }
     }
@@ -164,7 +167,7 @@ impl LayoutHTMLInputElementHelpers for LayoutJS<HTMLInputElement> {
 
         #[allow(unsafe_code)]
         unsafe fn get_raw_attr_value(input: LayoutJS<HTMLInputElement>) -> Option<String> {
-            let elem: LayoutJS<Element> = input.transmute_copy();
+            let elem = ElementCast::from_layout_js(&input);
             (*elem.unsafe_get()).get_attr_val_for_layout(&ns!(""), &atom!("value"))
                                 .map(|s| s.to_owned())
         }
@@ -240,10 +243,8 @@ impl<'a> HTMLInputElementMethods for JSRef<'a, HTMLInputElement> {
     make_bool_setter!(SetReadOnly, "readonly");
 
     // https://html.spec.whatwg.org/multipage/#dom-input-size
-    make_uint_getter!(Size);
-
-    // https://html.spec.whatwg.org/multipage/#dom-input-size
-    make_uint_setter!(SetSize, "size");
+    make_uint_getter!(Size, "size", DEFAULT_INPUT_SIZE);
+    make_limited_uint_setter!(SetSize, "size", DEFAULT_INPUT_SIZE);
 
     // https://html.spec.whatwg.org/multipage/#dom-input-type
     make_enumerated_getter!(Type, "text", ("hidden") | ("search") | ("tel") |
@@ -352,7 +353,7 @@ fn broadcast_radio_checked(broadcaster: JSRef<HTMLInputElement>, group: Option<&
                 .map(|t| t.root())
                 .filter(|r| in_same_group(r.r(), owner, group) && broadcaster != r.r())
         };
-        for r in iter {
+        for ref r in iter {
             if r.r().Checked() {
                 r.r().SetChecked(false);
             }
@@ -369,10 +370,10 @@ fn in_same_group<'a,'b>(other: JSRef<'a, HTMLInputElement>,
     let other_owner = other_owner.r();
     other.input_type.get() == InputType::InputRadio &&
     // TODO Both a and b are in the same home subtree.
-    other_owner.equals(owner) &&
+    other_owner == owner &&
     // TODO should be a unicode compatibility caseless match
     match (other.get_radio_group_name(), group) {
-        (Some(ref s1), Some(s2)) => s1.as_slice() == s2,
+        (Some(ref s1), Some(s2)) => &**s1 == s2,
         (None, None) => true,
         _ => false
     }
@@ -410,7 +411,7 @@ impl<'a> HTMLInputElementHelpers for JSRef<'a, HTMLInputElement> {
             broadcast_radio_checked(self,
                                     self.get_radio_group_name()
                                         .as_ref()
-                                        .map(|group| group.as_slice()));
+                                        .map(|group| &**group));
         }
         //TODO: dispatch change event
     }
@@ -479,7 +480,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLInputElement> {
             }
             &atom!("type") => {
                 let value = attr.value();
-                self.input_type.set(match value.as_slice() {
+                self.input_type.set(match &**value {
                     "button" => InputType::InputButton,
                     "submit" => InputType::InputSubmit,
                     "reset" => InputType::InputReset,
@@ -492,23 +493,23 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLInputElement> {
                 if self.input_type.get() == InputType::InputRadio {
                     self.radio_group_updated(self.get_radio_group_name()
                                                  .as_ref()
-                                                 .map(|group| group.as_slice()));
+                                                 .map(|group| &**group));
                 }
             }
             &atom!("value") => {
                 if !self.value_changed.get() {
-                    self.textinput.borrow_mut().set_content(attr.value().as_slice().to_owned());
+                    self.textinput.borrow_mut().set_content((**attr.value()).to_owned());
                 }
             }
             &atom!("name") => {
                 if self.input_type.get() == InputType::InputRadio {
                     let value = attr.value();
-                    self.radio_group_updated(Some(value.as_slice()));
+                    self.radio_group_updated(Some(&value));
                 }
             }
             _ if attr.local_name() == &Atom::from_slice("placeholder") => {
                 let value = attr.value();
-                let stripped = value.as_slice().chars()
+                let stripped = value.chars()
                     .filter(|&c| c != '\n' && c != '\r')
                     .collect::<String>();
                 *self.placeholder.borrow_mut() = stripped;
@@ -543,7 +544,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLInputElement> {
                     broadcast_radio_checked(*self,
                                             self.get_radio_group_name()
                                                 .as_ref()
-                                                .map(|group| group.as_slice()));
+                                                .map(|group| &**group));
                 }
                 self.input_type.set(InputType::InputText);
             }
@@ -566,7 +567,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLInputElement> {
 
     fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
         match name {
-            &atom!("size") => AttrValue::from_u32(value, DEFAULT_INPUT_SIZE),
+            &atom!("size") => AttrValue::from_limited_u32(value, DEFAULT_INPUT_SIZE),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
@@ -598,7 +599,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLInputElement> {
             s.handle_event(event);
         }
 
-        if "click" == event.Type().as_slice() && !event.DefaultPrevented() {
+        if &*event.Type() == "click" && !event.DefaultPrevented() {
             match self.input_type.get() {
                 InputType::InputRadio => self.update_checked_state(true, true),
                 _ => {}
@@ -611,13 +612,21 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLInputElement> {
 
             let doc = document_from_node(*self).root();
             doc.r().request_focus(ElementCast::from_ref(*self));
-        } else if "keydown" == event.Type().as_slice() && !event.DefaultPrevented() &&
+        } else if &*event.Type() == "keydown" && !event.DefaultPrevented() &&
             (self.input_type.get() == InputType::InputText ||
              self.input_type.get() == InputType::InputPassword) {
                 let keyevent: Option<JSRef<KeyboardEvent>> = KeyboardEventCast::to_ref(event);
                 keyevent.map(|keyevent| {
-                    match self.textinput.borrow_mut().handle_keydown(keyevent) {
-                        TriggerDefaultAction => (),
+                    // This can't be inlined, as holding on to textinput.borrow_mut()
+                    // during self.implicit_submission will cause a panic.
+                    let action = self.textinput.borrow_mut().handle_keydown(keyevent);
+                    match action {
+                        TriggerDefaultAction => {
+                            self.implicit_submission(keyevent.CtrlKey(),
+                                                     keyevent.ShiftKey(),
+                                                     keyevent.AltKey(),
+                                                     keyevent.MetaKey());
+                        },
                         DispatchInput => {
                             self.value_changed.set(true);
                             self.force_relayout();
@@ -690,11 +699,11 @@ impl<'a> Activatable for JSRef<'a, HTMLInputElement> {
                                 .filter_map(HTMLInputElementCast::to_temporary)
                                 .map(|t| t.root())
                                 .find(|r| {
-                                    in_same_group(r.r(), owner.r(), group.as_ref().map(|gr| gr.as_slice())) &&
+                                    in_same_group(r.r(), owner.r(), group.as_ref().map(|gr| &**gr)) &&
                                     r.r().Checked()
                                 })
                     };
-                    cache.checked_radio.assign(checked_member.r());
+                    cache.checked_radio.set(checked_member.r().map(JS::from_rooted));
                     cache.checked_changed = self.checked_changed.get();
                     self.SetChecked(true);
                 }
@@ -733,7 +742,7 @@ impl<'a> Activatable for JSRef<'a, HTMLInputElement> {
                     let old_checked: Option<Root<HTMLInputElement>> = cache.checked_radio.get().root();
                     let name = self.get_radio_group_name();
                     match old_checked {
-                        Some(o) => {
+                        Some(ref o) => {
                             // Avoiding iterating through the whole tree here, instead
                             // we can check if the conditions for radio group siblings apply
                             if name == o.r().get_radio_group_name() && // TODO should be compatibility caseless
@@ -812,18 +821,57 @@ impl<'a> Activatable for JSRef<'a, HTMLInputElement> {
         let doc = document_from_node(*self).root();
         let node: JSRef<Node> = NodeCast::from_ref(doc.r());
         let owner = self.form_owner();
+        let form = match owner {
+            None => return,
+            Some(ref f) => f.root()
+        };
+
         let elem: JSRef<Element> = ElementCast::from_ref(*self);
-        if owner.is_none() || elem.click_in_progress() {
+        if elem.click_in_progress() {
             return;
         }
         // This is safe because we are stopping after finding the first element
         // and only then performing actions which may modify the DOM tree
+        let submit_button;
         unsafe {
-            node.query_selector_iter("input[type=submit]".to_owned()).unwrap()
+            submit_button = node.query_selector_iter("input[type=submit]".to_owned()).unwrap()
                 .filter_map(HTMLInputElementCast::to_temporary)
                 .map(|t| t.root())
-                .find(|r| r.r().form_owner() == owner)
-                .map(|s| s.r().synthetic_click_activation(ctrlKey, shiftKey, altKey, metaKey));
+                .find(|r| r.r().form_owner() == owner);
+        }
+        match submit_button {
+            Some(ref button) => {
+                if button.r().is_instance_activatable() {
+                    button.r().synthetic_click_activation(ctrlKey, shiftKey, altKey, metaKey)
+                }
+            }
+            None => {
+                unsafe {
+                    // Safe because we don't perform any DOM modification
+                    // until we're done with the iterator.
+                    let inputs = node.query_selector_iter("input".to_owned()).unwrap()
+                        .filter_map(HTMLInputElementCast::to_temporary)
+                        .filter(|input| {
+                            let input = input.root();
+                            input.r().form_owner() == owner && match &*input.r().Type() {
+                                "text" | "search" | "url" | "tel" |
+                                "email" | "password" | "datetime" |
+                                "date" | "month" | "week" | "time" |
+                                "datetime-local" | "number"
+                                  => true,
+                                _ => false
+                            }
+                        });
+
+                    if inputs.skip(1).next().is_some() {
+                        // lazily test for > 1 submission-blocking inputs
+                        return;
+                    }
+                }
+
+                form.r().submit(SubmittedFrom::NotFromFormSubmitMethod,
+                                FormSubmitter::FormElement(form.r()));
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ use mime_classifier::MIMEClassifier;
 use resource_task::{start_sending, start_sending_sniffed, ProgressSender};
 
 use std::borrow::ToOwned;
+use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ enum ReadStatus {
 
 fn read_block(reader: &mut File) -> Result<ReadStatus, String> {
     let mut buf = vec![0; READ_SIZE];
-    match reader.read(buf.as_mut_slice()) {
+    match reader.read(&mut buf) {
         Ok(0) => return Ok(ReadStatus::EOF),
         Ok(n) => {
             buf.truncate(n);

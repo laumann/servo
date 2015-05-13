@@ -14,7 +14,8 @@ use dom::bindings::error::{Error, ErrorResult, Fallible};
 use dom::bindings::error::Error::{InvalidState, InvalidAccess};
 use dom::bindings::error::Error::{Network, Syntax, Security, Abort, Timeout};
 use dom::bindings::global::{GlobalField, GlobalRef, GlobalRoot};
-use dom::bindings::js::{MutNullableJS, JS, JSRef, Temporary, OptionalRootedRootable};
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, OptionalRootable};
+use dom::bindings::js::{Rootable, Temporary};
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::str::ByteString;
 use dom::bindings::utils::{Reflectable, reflect_dom_object};
@@ -55,18 +56,19 @@ use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::cell::{RefCell, Cell};
 use std::default::Default;
-use std::old_io::Timer;
 use std::str::FromStr;
 use std::sync::{Mutex, Arc};
-use std::time::duration::Duration;
+use std::sync::mpsc::{channel, Sender, TryRecvError};
+use std::thread::sleep_ms;
 use time;
 use url::{Url, UrlParser};
 
 use dom::bindings::codegen::UnionTypes::StringOrURLSearchParams;
 use dom::bindings::codegen::UnionTypes::StringOrURLSearchParams::{eString, eURLSearchParams};
+
 pub type SendParam = StringOrURLSearchParams;
 
-#[derive(PartialEq, Copy)]
+#[derive(PartialEq, Copy, Clone)]
 #[jstraceable]
 enum XMLHttpRequestState {
     Unsent = 0,
@@ -125,7 +127,7 @@ pub struct XMLHttpRequest {
     status_text: DOMRefCell<ByteString>,
     response: DOMRefCell<ByteString>,
     response_type: Cell<XMLHttpRequestResponseType>,
-    response_xml: MutNullableJS<Document>,
+    response_xml: MutNullableHeap<JS<Document>>,
     response_headers: DOMRefCell<Headers>,
 
     // Associated concepts
@@ -139,7 +141,7 @@ pub struct XMLHttpRequest {
     send_flag: Cell<bool>,
 
     global: GlobalField,
-    timer: DOMRefCell<Timer>,
+    timeout_cancel: DOMRefCell<Option<Sender<()>>>,
     fetch_time: Cell<i64>,
     timeout_target: DOMRefCell<Option<Box<ScriptChan+Send>>>,
     generation_id: Cell<GenerationId>,
@@ -173,7 +175,7 @@ impl XMLHttpRequest {
             upload_events: Cell::new(false),
 
             global: GlobalField::from_rooted(&global),
-            timer: DOMRefCell::new(Timer::new().unwrap()),
+            timeout_cancel: DOMRefCell::new(None),
             fetch_time: Cell::new(0),
             timeout_target: DOMRefCell::new(None),
             generation_id: Cell::new(GenerationId(0)),
@@ -252,7 +254,7 @@ impl XMLHttpRequest {
             }
 
             fn data_available(&self, payload: Vec<u8>) {
-                self.buf.borrow_mut().push_all(payload.as_slice());
+                self.buf.borrow_mut().push_all(&payload);
                 let xhr = self.xhr.to_temporary().root();
                 xhr.r().process_data_available(self.gen_id, self.buf.borrow().clone());
             }
@@ -297,7 +299,7 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
             // since methods like "patch" or "PaTcH" will be considered extension methods
             // despite the there being a rust-http method variant for them
             let upper = s.to_ascii_uppercase();
-            match upper.as_slice() {
+            match &*upper {
                 "DELETE" | "GET" | "HEAD" | "OPTIONS" |
                 "POST" | "PUT" | "CONNECT" | "TRACE" |
                 "TRACK" => upper.parse().ok(),
@@ -308,7 +310,7 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
         match maybe_method {
             // Step 4
             Some(Method::Connect) | Some(Method::Trace) => Err(Security),
-            Some(Method::Extension(ref t)) if t.as_slice() == "TRACK" => Err(Security),
+            Some(Method::Extension(ref t)) if &**t == "TRACK" => Err(Security),
             Some(parsed_method) => {
                 // Step 3
                 if !method.is_token() {
@@ -319,7 +321,7 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
 
                 // Step 6
                 let base = self.global.root().r().get_url();
-                let parsed_url = match UrlParser::new().base_url(&base).parse(url.as_slice()) {
+                let parsed_url = match UrlParser::new().base_url(&base).parse(&url) {
                     Ok(parsed) => parsed,
                     Err(_) => return Err(Syntax) // Step 7
                 };
@@ -398,14 +400,14 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
                 debug!("SetRequestHeader: old value = {:?}", raw[0]);
                 let mut buf = raw[0].clone();
                 buf.push_all(b", ");
-                buf.push_all(value.as_slice());
+                buf.push_all(&value);
                 debug!("SetRequestHeader: new value = {:?}", buf);
                 value = ByteString::new(buf);
             },
             None => {}
         }
 
-        headers.set_raw(name_str.to_owned(), vec![value.as_slice().to_vec()]);
+        headers.set_raw(name_str.to_owned(), vec![value.to_vec()]);
         Ok(())
     }
 
@@ -462,7 +464,7 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
 
     // https://xhr.spec.whatwg.org/#the-upload-attribute
     fn Upload(self) -> Temporary<XMLHttpRequestUpload> {
-        Temporary::new(self.upload)
+        Temporary::from_rooted(self.upload)
     }
 
     // https://xhr.spec.whatwg.org/#the-send()-method
@@ -513,7 +515,9 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
 
         }
 
-        let mut load_data = LoadData::new(self.request_url.borrow().clone().unwrap());
+        let global = self.global.root();
+        let pipeline_id = global.r().pipeline();
+        let mut load_data = LoadData::new(self.request_url.borrow().clone().unwrap(), Some(pipeline_id));
         load_data.data = extracted;
 
         #[inline]
@@ -562,14 +566,14 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
         match cors_request {
             Ok(None) => {
                 let mut buf = String::new();
-                buf.push_str(referer_url.scheme.as_slice());
-                buf.push_str("://".as_slice());
-                referer_url.serialize_host().map(|ref h| buf.push_str(h.as_slice()));
+                buf.push_str(&referer_url.scheme);
+                buf.push_str("://");
+                referer_url.serialize_host().map(|ref h| buf.push_str(h));
                 referer_url.port().as_ref().map(|&p| {
-                    buf.push_str(":".as_slice());
-                    buf.push_str(p.to_string().as_slice());
+                    buf.push_str(":");
+                    buf.push_str(&p.to_string());
                 });
-                referer_url.serialize_path().map(|ref h| buf.push_str(h.as_slice()));
+                referer_url.serialize_path().map(|ref h| buf.push_str(h));
                 self.request_headers.borrow_mut().set_raw("Referer".to_owned(), vec![buf.into_bytes()]);
             },
             Ok(Some(ref req)) => self.insert_trusted_header("origin".to_owned(),
@@ -677,8 +681,8 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
             },
             _ if self.ready_state.get() != XMLHttpRequestState::Done => NullValue(),
             Json => {
-                let decoded = UTF_8.decode(self.response.borrow().as_slice(), DecoderTrap::Replace).unwrap().to_owned();
-                let decoded: Vec<u16> = decoded.as_slice().utf16_units().collect();
+                let decoded = UTF_8.decode(&self.response.borrow(), DecoderTrap::Replace).unwrap().to_owned();
+                let decoded: Vec<u16> = decoded.utf16_units().collect();
                 let mut vp = UndefinedValue();
                 unsafe {
                     if JS_ParseJSON(cx, decoded.as_ptr(), decoded.len() as u32, &mut vp) == 0 {
@@ -710,7 +714,7 @@ impl<'a> XMLHttpRequestMethods for JSRef<'a, XMLHttpRequest> {
 
     // https://xhr.spec.whatwg.org/#the-responsexml-attribute
     fn GetResponseXML(self) -> Option<Temporary<Document>> {
-        self.response_xml.get()
+        self.response_xml.get().map(Temporary::from_rooted)
     }
 }
 
@@ -962,7 +966,7 @@ impl<'a> PrivateXMLHttpRequestHelpers for JSRef<'a, XMLHttpRequest> {
         let total = self.response_headers.borrow().get::<ContentLength>().map(|x| {**x as u64});
         self.dispatch_progress_event(false, type_, len, total);
     }
-    fn set_timeout(self, timeout: u32) {
+    fn set_timeout(self, duration_ms: u32) {
         struct XHRTimeout {
             xhr: TrustedXHRAddress,
             gen_id: GenerationId,
@@ -980,22 +984,23 @@ impl<'a> PrivateXMLHttpRequestHelpers for JSRef<'a, XMLHttpRequest> {
 
         // Sets up the object to timeout in a given number of milliseconds
         // This will cancel all previous timeouts
-        let oneshot = self.timer.borrow_mut()
-                          .oneshot(Duration::milliseconds(timeout as i64));
         let timeout_target = (*self.timeout_target.borrow().as_ref().unwrap()).clone();
         let global = self.global.root();
         let xhr = Trusted::new(global.r().get_cx(), self, global.r().script_chan());
         let gen_id = self.generation_id.get();
+        let (cancel_tx, cancel_rx) = channel();
+        *self.timeout_cancel.borrow_mut() = Some(cancel_tx);
         spawn_named("XHR:Timer".to_owned(), move || {
-            match oneshot.recv() {
-                Ok(_) => {
+            sleep_ms(duration_ms);
+            match cancel_rx.try_recv() {
+                Err(TryRecvError::Empty) => {
                     timeout_target.send(ScriptMsg::RunnableMsg(box XHRTimeout {
                         xhr: xhr,
                         gen_id: gen_id,
                     })).unwrap();
                 },
-                Err(_) => {
-                    // This occurs if xhr.timeout (the sender) goes out of scope (i.e, xhr went out of scope)
+                Err(TryRecvError::Disconnected) | Ok(()) => {
+                    // This occurs if xhr.timeout_cancel (the sender) goes out of scope (i.e, xhr went out of scope)
                     // or if the oneshot timer was overwritten. The former case should not happen due to pinning.
                     debug!("XHR timeout was overwritten or canceled")
                 }
@@ -1005,8 +1010,9 @@ impl<'a> PrivateXMLHttpRequestHelpers for JSRef<'a, XMLHttpRequest> {
     }
 
     fn cancel_timeout(self) {
-        // oneshot() closes the previous channel, canceling the timeout
-        self.timer.borrow_mut().oneshot(Duration::zero());
+        if let Some(cancel_tx) = self.timeout_cancel.borrow_mut().take() {
+            let _ = cancel_tx.send(());
+        }
     }
 
     fn text_response(self) -> DOMString {
@@ -1015,7 +1021,7 @@ impl<'a> PrivateXMLHttpRequestHelpers for JSRef<'a, XMLHttpRequest> {
             Some(&ContentType(mime::Mime(_, _, ref params))) => {
                 for &(ref name, ref value) in params.iter() {
                     if name == &mime::Attr::Charset {
-                        encoding = encoding_from_whatwg_label(value.to_string().as_slice()).unwrap_or(encoding);
+                        encoding = encoding_from_whatwg_label(&value.to_string()).unwrap_or(encoding);
                     }
                 }
             },
@@ -1027,7 +1033,7 @@ impl<'a> PrivateXMLHttpRequestHelpers for JSRef<'a, XMLHttpRequest> {
         let response = self.response.borrow();
         // According to Simon, decode() should never return an error, so unwrap()ing
         // the result should be fine. XXXManishearth have a closer look at this later
-        encoding.decode(response.as_slice(), DecoderTrap::Replace).unwrap().to_owned()
+        encoding.decode(&response, DecoderTrap::Replace).unwrap().to_owned()
     }
     fn filter_response_headers(self) -> Headers {
         // https://fetch.spec.whatwg.org/#concept-response-header-list
@@ -1127,7 +1133,7 @@ impl Extractable for SendParam {
         // https://fetch.spec.whatwg.org/#concept-fetchbodyinit-extract
         let encoding = UTF_8 as EncodingRef;
         match *self {
-            eString(ref s) => encoding.encode(s.as_slice(), EncoderTrap::Replace).unwrap(),
+            eString(ref s) => encoding.encode(s, EncoderTrap::Replace).unwrap(),
             eURLSearchParams(ref usp) => usp.root().r().serialize(None) // Default encoding is UTF8
         }
     }

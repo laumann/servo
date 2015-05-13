@@ -12,7 +12,7 @@ use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLFrameSetElementDerived};
 use dom::bindings::codegen::InheritTypes::{EventTargetCast, HTMLInputElementCast, NodeCast};
 use dom::bindings::codegen::InheritTypes::{HTMLElementDerived, HTMLBodyElementDerived};
-use dom::bindings::js::{JSRef, Temporary, MutNullableJS};
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, Rootable, Temporary};
 use dom::bindings::error::ErrorResult;
 use dom::bindings::error::Error::Syntax;
 use dom::bindings::utils::Reflectable;
@@ -39,8 +39,8 @@ use std::default::Default;
 #[dom_struct]
 pub struct HTMLElement {
     element: Element,
-    style_decl: MutNullableJS<CSSStyleDeclaration>,
-    dataset: MutNullableJS<DOMStringMap>,
+    style_decl: MutNullableHeap<JS<CSSStyleDeclaration>>,
+    dataset: MutNullableHeap<JS<DOMStringMap>>,
 }
 
 impl HTMLElementDerived for EventTarget {
@@ -176,7 +176,7 @@ fn to_snake_case(name: DOMString) -> DOMString {
     for ch in name.chars() {
         if ch.is_uppercase() {
             attr_name.push('\x2d');
-            attr_name.push(ch.to_lowercase());
+            attr_name.extend(ch.to_lowercase());
         } else {
             attr_name.push(ch);
         }
@@ -186,7 +186,7 @@ fn to_snake_case(name: DOMString) -> DOMString {
 
 impl<'a> HTMLElementCustomAttributeHelpers for JSRef<'a, HTMLElement> {
     fn set_custom_attr(self, name: DOMString, value: DOMString) -> ErrorResult {
-        if name.as_slice().chars()
+        if name.chars()
                .skip_while(|&ch| ch != '\u{2d}')
                .nth(1).map_or(false, |ch| ch >= 'a' && ch <= 'z') {
             return Err(Syntax);
@@ -203,7 +203,7 @@ impl<'a> HTMLElementCustomAttributeHelpers for JSRef<'a, HTMLElement> {
             // FIXME(https://github.com/rust-lang/rust/issues/23338)
             let attr = attr.r();
             let value = attr.value();
-            value.as_slice().to_owned()
+            (**value).to_owned()
         })
     }
 
@@ -234,12 +234,12 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLElement> {
             let evtarget: JSRef<EventTarget> = EventTargetCast::from_ref(*self);
             evtarget.set_event_handler_uncompiled(cx, url, reflector,
                                                   &name[2..],
-                                                  attr.value().as_slice().to_owned());
+                                                  (**attr.value()).to_owned());
         }
     }
 }
 
-#[derive(Copy, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 #[jstraceable]
 pub enum HTMLElementTypeId {
     HTMLElement,

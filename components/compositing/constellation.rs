@@ -2,7 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use pipeline::Pipeline;
+//! The `Constellation`, Servo's Grand Central Station
+//!
+//! The primary duty of a `Constellation` is to mediate between the
+//! graphics compositor and the many `Pipeline`s in the browser's
+//! navigation context, each `Pipeline` encompassing a `ScriptTask`,
+//! `LayoutTask`, and `PaintTask`.
+
+use pipeline::{Pipeline, CompositionPipeline};
 
 use compositor_task::CompositorProxy;
 use compositor_task::Msg as CompositorMsg;
@@ -14,6 +21,7 @@ use gfx::font_cache_task::FontCacheTask;
 use layout_traits::{LayoutControlMsg, LayoutTaskFactory};
 use libc;
 use msg::compositor_msg::LayerId;
+use msg::constellation_msg::AnimationState;
 use msg::constellation_msg::Msg as ConstellationMsg;
 use msg::constellation_msg::{FrameId, PipelineExitType, PipelineId};
 use msg::constellation_msg::{IFrameSandboxState, MozBrowserEvent, NavigationDirection};
@@ -23,8 +31,8 @@ use msg::constellation_msg::{self, ConstellationChan, Failure};
 use net_traits::{self, ResourceTask};
 use net_traits::image_cache_task::ImageCacheTask;
 use net_traits::storage_task::{StorageTask, StorageTaskMsg};
-use profile::mem;
-use profile::time;
+use profile_traits::mem;
+use profile_traits::time;
 use script_traits::{CompositorEvent, ConstellationControlMsg};
 use script_traits::{ScriptControlChan, ScriptTaskFactory};
 use std::borrow::ToOwned;
@@ -33,6 +41,7 @@ use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::mem::replace;
 use std::sync::mpsc::{Sender, Receiver, channel};
+use style::viewport::ViewportConstraints;
 use url::Url;
 use util::cursor::Cursor;
 use util::geometry::PagePx;
@@ -42,6 +51,11 @@ use clipboard::ClipboardContext;
 use webdriver_traits::WebDriverScriptCommand;
 
 /// Maintains the pipelines and navigation context and grants permission to composite.
+///
+/// It is parameterized over a `LayoutTaskFactory` and a
+/// `ScriptTaskFactory` (which in practice are implemented by
+/// `LayoutTask` in the `layout` crate, and `ScriptTask` in
+/// the `script` crate).
 pub struct Constellation<LTF, STF> {
     /// A channel through which messages can be sent to this object.
     pub chan: ConstellationChan,
@@ -170,7 +184,7 @@ pub struct SendableFrameTree {
     pub children: Vec<SendableFrameTree>,
 }
 
-#[derive(Copy)]
+#[derive(Clone, Copy)]
 enum ExitPipelineMode {
     Normal,
     Force,
@@ -344,8 +358,8 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
                                                             sandbox);
             }
             ConstellationMsg::SetCursor(cursor) => self.handle_set_cursor_msg(cursor),
-            ConstellationMsg::ChangeRunningAnimationsState(pipeline_id, animations_running) => {
-                self.handle_change_running_animations_state(pipeline_id, animations_running)
+            ConstellationMsg::ChangeRunningAnimationsState(pipeline_id, animation_state) => {
+                self.handle_change_running_animations_state(pipeline_id, animation_state)
             }
             ConstellationMsg::TickAnimation(pipeline_id) => {
                 self.handle_tick_animation(pipeline_id)
@@ -385,9 +399,9 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
                 debug!("constellation got get-pipeline-title message");
                 self.handle_get_pipeline_title_msg(pipeline_id);
             }
-            ConstellationMsg::MozBrowserEventMsg(pipeline_id,
-                                                 subpage_id,
-                                                 event) => {
+            ConstellationMsg::MozBrowserEvent(pipeline_id,
+                                              subpage_id,
+                                              event) => {
                 debug!("constellation got mozbrowser event message");
                 self.handle_mozbrowser_event_msg(pipeline_id,
                                                  subpage_id,
@@ -397,7 +411,7 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
                 debug!("constellation got get root pipeline message");
                 self.handle_get_root_pipeline(resp_chan);
             }
-            ConstellationMsg::FocusMsg(pipeline_id) => {
+            ConstellationMsg::Focus(pipeline_id) => {
                 debug!("constellation got focus message");
                 self.handle_focus_msg(pipeline_id);
             }
@@ -411,11 +425,18 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
                 };
                 sender.send(result).unwrap();
             }
-            ConstellationMsg::WebDriverCommandMsg(pipeline_id,
-                                                  command) => {
+            ConstellationMsg::CompositePng(reply) => {
+                self.compositor_proxy.send(CompositorMsg::CreatePng(reply));
+            }
+            ConstellationMsg::WebDriverCommand(pipeline_id,
+                                               command) => {
                 debug!("constellation got webdriver command message");
                 self.handle_webdriver_command_msg(pipeline_id,
                                                   command);
+            }
+            ConstellationMsg::ViewportConstrained(pipeline_id, constraints) => {
+                debug!("constellation got viewport-constrained event message");
+                self.handle_viewport_constrained_msg(pipeline_id, constraints);
             }
         }
         true
@@ -560,16 +581,16 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
 
     fn handle_change_running_animations_state(&mut self,
                                               pipeline_id: PipelineId,
-                                              animations_running: bool) {
+                                              animation_state: AnimationState) {
         self.compositor_proxy.send(CompositorMsg::ChangeRunningAnimationsState(pipeline_id,
-                                                                               animations_running))
+                                                                               animation_state))
     }
 
     fn handle_tick_animation(&mut self, pipeline_id: PipelineId) {
         self.pipeline(pipeline_id)
             .layout_chan
             .0
-            .send(LayoutControlMsg::TickAnimationsMsg)
+            .send(LayoutControlMsg::TickAnimations)
             .unwrap();
     }
 
@@ -745,7 +766,7 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
         if let Some((containing_pipeline_id, subpage_id)) = self.pipeline(pipeline_id).parent_info {
             let pipeline = self.pipeline(containing_pipeline_id);
             let ScriptControlChan(ref script_channel) = pipeline.script_chan;
-            let event = ConstellationControlMsg::FocusIFrameMsg(containing_pipeline_id,
+            let event = ConstellationControlMsg::FocusIFrame(containing_pipeline_id,
                                                                 subpage_id);
             script_channel.send(event).unwrap();
 
@@ -766,7 +787,7 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
         // Find the script channel for the given parent pipeline,
         // and pass the event to that script task.
         let pipeline = self.pipeline(pipeline_id);
-        let control_msg = ConstellationControlMsg::WebDriverCommandMsg(pipeline_id, msg);
+        let control_msg = ConstellationControlMsg::WebDriverCommand(pipeline_id, msg);
         let ScriptControlChan(ref script_channel) = pipeline.script_chan;
         script_channel.send(control_msg).unwrap();
     }
@@ -910,6 +931,11 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
         }
 
         self.window_size = new_size;
+    }
+
+    /// Handle updating actual viewport / zoom due to @viewport rules
+    fn handle_viewport_constrained_msg(&mut self, pipeline_id: PipelineId, constraints: ViewportConstraints) {
+        self.compositor_proxy.send(CompositorMsg::ViewportConstrained(pipeline_id, constraints));
     }
 
     // Close a frame (and all children)

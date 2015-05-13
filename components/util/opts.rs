@@ -11,19 +11,20 @@ use geom::scale_factor::ScaleFactor;
 use geom::size::TypedSize2D;
 use layers::geometry::DevicePixel;
 use getopts;
+use num_cpus;
 use std::collections::HashSet;
 use std::cmp;
 use std::env;
 use std::io::{self, Write};
 use std::mem;
 use std::ptr;
-use std::rt;
+use url::{self, Url};
 
 /// Global flags for Servo, currently set on the command line.
 #[derive(Clone)]
 pub struct Opts {
     /// The initial URL to load.
-    pub url: String,
+    pub url: Url,
 
     /// How many threads to use for CPU painting (`-t`).
     ///
@@ -145,7 +146,7 @@ pub struct Opts {
 
 fn print_usage(app: &str, opts: &[getopts::OptGroup]) {
     let message = format!("Usage: {} [ options ... ] [URL]\n\twhere options include", app);
-    println!("{}", getopts::usage(message.as_slice(), opts));
+    println!("{}", getopts::usage(&message, opts));
 }
 
 pub fn print_debug_usage(app: &str)  {
@@ -192,7 +193,7 @@ static FORCE_CPU_PAINTING: bool = false;
 
 pub fn default_opts() -> Opts {
     Opts {
-        url: String::new(),
+        url: Url::parse("about:blank").unwrap(),
         paint_threads: 1,
         gpu_painting: false,
         tile_size: 512,
@@ -257,21 +258,20 @@ pub fn from_cmdline_args(args: &[String]) -> bool {
         getopts::optopt("u", "user-agent", "Set custom user agent string", "NCSA Mosaic/1.0 (X11;SunOS 4.1.4 sun4m)"),
         getopts::optopt("Z", "debug", "A comma-separated string of debug options. Pass help to show available options.", ""),
         getopts::optflag("h", "help", "Print this message"),
-        getopts::optopt("r", "render-api", "Set the rendering API to use", "gl|mesa"),
         getopts::optopt("", "resources-path", "Path to find static resources", "/home/servo/resources"),
         getopts::optflag("", "sniff-mime-types" , "Enable MIME sniffing"),
     );
 
-    let opt_match = match getopts::getopts(args, opts.as_slice()) {
+    let opt_match = match getopts::getopts(args, &opts) {
         Ok(m) => m,
         Err(f) => {
-            args_fail(f.to_string().as_slice());
+            args_fail(&f.to_string());
             return false;
         }
     };
 
     if opt_match.opt_present("h") || opt_match.opt_present("help") {
-        print_usage(app_name.as_slice(), opts.as_slice());
+        print_usage(&app_name, &opts);
         return false;
     };
 
@@ -280,20 +280,27 @@ pub fn from_cmdline_args(args: &[String]) -> bool {
         None => String::new()
     };
     let mut debug_options = HashSet::new();
-    for split in debug_string.as_slice().split(',') {
+    for split in debug_string.split(',') {
         debug_options.insert(split.clone());
     }
     if debug_options.contains(&"help") {
-        print_debug_usage(app_name.as_slice());
+        print_debug_usage(&app_name);
         return false;
     }
 
     let url = if opt_match.free.is_empty() {
-        print_usage(app_name.as_slice(), opts.as_slice());
+        print_usage(&app_name, &opts);
         args_fail("servo asks that you provide a URL");
         return false;
     } else {
-        opt_match.free[0].clone()
+        let ref url = opt_match.free[0];
+        let cwd = env::current_dir().unwrap();
+        match Url::parse(url) {
+            Ok(url) => url,
+            Err(url::ParseError::RelativeUrlWithoutBase)
+                => Url::from_file_path(&*cwd.join(url)).unwrap(),
+            Err(_) => panic!("URL parsing failed"),
+        }
     };
 
     let tile_size: usize = match opt_match.opt_str("s") {
@@ -307,7 +314,7 @@ pub fn from_cmdline_args(args: &[String]) -> bool {
 
     let mut paint_threads: usize = match opt_match.opt_str("t") {
         Some(paint_threads_str) => paint_threads_str.parse().unwrap(),
-        None => cmp::max(rt::default_sched_threads() * 3 / 4, 1),
+        None => cmp::max(num_cpus::get() * 3 / 4, 1),
     };
 
     // If only the flag is present, default to a 5 second period for both profilers.
@@ -322,7 +329,7 @@ pub fn from_cmdline_args(args: &[String]) -> bool {
 
     let mut layout_threads: usize = match opt_match.opt_str("y") {
         Some(layout_threads_str) => layout_threads_str.parse().unwrap(),
-        None => cmp::max(rt::default_sched_threads() * 3 / 4, 1),
+        None => cmp::max(num_cpus::get() * 3 / 4, 1),
     };
 
     let nonincremental_layout = opt_match.opt_present("i");
@@ -392,12 +399,15 @@ pub fn from_cmdline_args(args: &[String]) -> bool {
         disable_share_style_cache: debug_options.contains(&"disable-share-style-cache"),
     };
 
-    set_opts(opts);
+    set(opts);
     true
 }
 
 static mut EXPERIMENTAL_ENABLED: bool = false;
 
+/// Turn on experimental features globally. Normally this is done
+/// during initialization by `set` or `from_cmdline_args`, but
+/// tests that require experimental features will also set it.
 pub fn set_experimental_enabled(new_value: bool) {
     unsafe {
         EXPERIMENTAL_ENABLED = new_value;
@@ -415,8 +425,10 @@ pub fn experimental_enabled() -> bool {
 // when passing through the DOM structures.
 static mut OPTIONS: *mut Opts = 0 as *mut Opts;
 
-pub fn set_opts(opts: Opts) {
+pub fn set(opts: Opts) {
     unsafe {
+        assert!(OPTIONS.is_null());
+        set_experimental_enabled(opts.enable_experimental);
         let box_opts = box opts;
         OPTIONS = mem::transmute(box_opts);
     }
@@ -430,7 +442,7 @@ pub fn get<'a>() -> &'a Opts {
         // set of options. This is mostly useful for unit tests that
         // run through a code path which queries the cmd line options.
         if OPTIONS == ptr::null_mut() {
-            set_opts(default_opts());
+            set(default_opts());
         }
         mem::transmute(OPTIONS)
     }

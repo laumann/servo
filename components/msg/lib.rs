@@ -7,8 +7,10 @@ extern crate azure;
 extern crate geom;
 extern crate hyper;
 extern crate layers;
+extern crate png;
 extern crate util;
 extern crate url;
+extern crate style;
 extern crate webdriver_traits;
 
 #[cfg(target_os="macos")]

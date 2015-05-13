@@ -22,11 +22,14 @@ path = "../msg"
 [dependencies.net]
 path = "../net"
 
-[dependencies.profile]
-path = "../profile"
+[dependencies.profile_traits]
+path = "../profile_traits"
 
 [dependencies.net_traits]
 path = "../net_traits"
+
+[dependencies.style]
+path = "../style"
 
 [dependencies.util]
 path = "../util"
@@ -59,13 +62,13 @@ git = "https://github.com/servo/rust-core-text"
 git = "https://github.com/servo/gleam"
 
 [dependencies.clipboard]
-git = "https://github.com/aweinstock314/rust-x11-clipboard"
+git = "https://github.com/servo/rust-x11-clipboard"
 
 [dependencies.session_types]
 git = "https://github.com/Munksgaard/session-types"
-branch = "for-servo"
 
 [dependencies]
+num = "0.1.24"
 url = "0.2.16"
 time = "0.1.17"
 libc = "*"

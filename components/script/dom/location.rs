@@ -5,7 +5,7 @@
 use dom::bindings::codegen::Bindings::LocationBinding;
 use dom::bindings::codegen::Bindings::LocationBinding::LocationMethods;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, JSRef, Temporary};
+use dom::bindings::js::{JS, JSRef, Rootable, Temporary};
 use dom::bindings::str::USVString;
 use dom::bindings::utils::{Reflector, reflect_dom_object};
 use dom::urlhelper::UrlHelper;
@@ -53,7 +53,7 @@ impl<'a> LocationMethods for JSRef<'a, Location> {
     }
 
     // https://url.spec.whatwg.org/#URLUtils-stringification-behavior
-    fn Stringify(self) -> DOMString {
+    fn Stringifier(self) -> DOMString {
         self.Href().0
     }
 

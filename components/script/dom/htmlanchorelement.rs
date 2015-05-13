@@ -13,7 +13,8 @@ use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::InheritTypes::{HTMLAnchorElementDerived, HTMLImageElementDerived};
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLElementCast};
 use dom::bindings::codegen::InheritTypes::{MouseEventCast, NodeCast};
-use dom::bindings::js::{MutNullableJS, JSRef, Temporary, OptionalRootable};
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, Rootable, Temporary};
+use dom::bindings::js::OptionalRootable;
 use dom::document::{Document, DocumentHelpers};
 use dom::domtokenlist::DOMTokenList;
 use dom::element::{Element, AttributeHandlers, ElementTypeId};
@@ -24,15 +25,15 @@ use dom::node::{Node, NodeHelpers, NodeTypeId, document_from_node, window_from_n
 use dom::virtualmethods::VirtualMethods;
 use dom::window::WindowHelpers;
 
+use num::ToPrimitive;
 use std::default::Default;
-use std::num::ToPrimitive;
 use string_cache::Atom;
 use util::str::DOMString;
 
 #[dom_struct]
 pub struct HTMLAnchorElement {
     htmlelement: HTMLElement,
-    rel_list: MutNullableJS<DOMTokenList>,
+    rel_list: MutNullableHeap<JS<DOMTokenList>>,
 }
 
 impl HTMLAnchorElementDerived for EventTarget {
@@ -134,8 +135,8 @@ impl<'a> Activatable for JSRef<'a, HTMLAnchorElement> {
                 let target_node = NodeCast::to_ref(target).unwrap();
                 let rect = window_from_node(target_node).root().r().content_box_query(target_node.to_trusted_node_address());
                 ismap_suffix = Some(
-                    format!("?{},{}", mouse_event.ClientX().to_f32().unwrap() - rect.origin.x.to_frac32_px(),
-                                      mouse_event.ClientY().to_f32().unwrap() - rect.origin.y.to_frac32_px())
+                    format!("?{},{}", mouse_event.ClientX().to_f32().unwrap() - rect.origin.x.to_f32_px(),
+                                      mouse_event.ClientY().to_f32().unwrap() - rect.origin.y.to_f32_px())
                 )
             }
         }

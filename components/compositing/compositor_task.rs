@@ -17,16 +17,18 @@ use geom::rect::Rect;
 use geom::size::Size2D;
 use layers::platform::surface::{NativeCompositingGraphicsContext, NativeGraphicsMetadata};
 use layers::layers::LayerBufferSet;
-use msg::compositor_msg::{Epoch, LayerId, LayerMetadata, ReadyState};
+use msg::compositor_msg::{Epoch, LayerId, LayerMetadata, FrameTreeId, ReadyState};
 use msg::compositor_msg::{PaintListener, PaintState, ScriptListener, ScrollPolicy};
-use msg::constellation_msg::{ConstellationChan, PipelineId};
+use msg::constellation_msg::{AnimationState, ConstellationChan, PipelineId};
 use msg::constellation_msg::{Key, KeyState, KeyModifiers};
 use pipeline::CompositionPipeline;
-use profile::mem;
-use profile::time;
+use profile_traits::mem;
+use profile_traits::time;
+use png;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::fmt::{Error, Formatter, Debug};
 use std::rc::Rc;
+use style::viewport::ViewportConstraints;
 use url::Url;
 use util::cursor::Cursor;
 
@@ -96,7 +98,7 @@ impl ScriptListener for Box<CompositorProxy+'static+Send> {
 }
 
 /// Information about each layer that the compositor keeps.
-#[derive(Copy)]
+#[derive(Clone, Copy)]
 pub struct LayerProperties {
     pub pipeline_id: PipelineId,
     pub epoch: Epoch,
@@ -133,8 +135,9 @@ impl PaintListener for Box<CompositorProxy+'static+Send> {
     fn assign_painted_buffers(&mut self,
                               pipeline_id: PipelineId,
                               epoch: Epoch,
-                              replies: Vec<(LayerId, Box<LayerBufferSet>)>) {
-        self.send(Msg::AssignPaintedBuffers(pipeline_id, epoch, replies));
+                              replies: Vec<(LayerId, Box<LayerBufferSet>)>,
+                              frame_tree_id: FrameTreeId) {
+        self.send(Msg::AssignPaintedBuffers(pipeline_id, epoch, replies, frame_tree_id));
     }
 
     fn initialize_layers_for_pipeline(&mut self,
@@ -193,7 +196,7 @@ pub enum Msg {
     /// Scroll a page in a window
     ScrollFragmentPoint(PipelineId, LayerId, Point2D<f32>),
     /// Requests that the compositor assign the painted buffers to the given layers.
-    AssignPaintedBuffers(PipelineId, Epoch, Vec<(LayerId, Box<LayerBufferSet>)>),
+    AssignPaintedBuffers(PipelineId, Epoch, Vec<(LayerId, Box<LayerBufferSet>)>, FrameTreeId),
     /// Alerts the compositor to the current status of page loading.
     ChangeReadyState(PipelineId, ReadyState),
     /// Alerts the compositor to the current status of painting.
@@ -203,7 +206,7 @@ pub enum Msg {
     /// Alerts the compositor that the current page has changed its URL.
     ChangePageUrl(PipelineId, Url),
     /// Alerts the compositor that the given pipeline has changed whether it is running animations.
-    ChangeRunningAnimationsState(PipelineId, bool),
+    ChangeRunningAnimationsState(PipelineId, AnimationState),
     /// Alerts the compositor that a `PaintMsg` has been discarded.
     PaintMsgDiscarded,
     /// Replaces the current frame tree, typically called during main frame navigation.
@@ -218,8 +221,12 @@ pub enum Msg {
     KeyEvent(Key, KeyState, KeyModifiers),
     /// Changes the cursor.
     SetCursor(Cursor),
+    /// Composite to a PNG file and return the Image over a passed channel.
+    CreatePng(Sender<Option<png::Image>>),
     /// Informs the compositor that the paint task for the given pipeline has exited.
     PaintTaskExited(PipelineId),
+    /// Alerts the compositor that the viewport has been constrained in some manner
+    ViewportConstrained(PipelineId, ViewportConstraints),
 }
 
 impl Debug for Msg {
@@ -245,7 +252,9 @@ impl Debug for Msg {
             Msg::RecompositeAfterScroll => write!(f, "RecompositeAfterScroll"),
             Msg::KeyEvent(..) => write!(f, "KeyEvent"),
             Msg::SetCursor(..) => write!(f, "SetCursor"),
+            Msg::CreatePng(..) => write!(f, "CreatePng"),
             Msg::PaintTaskExited(..) => write!(f, "PaintTaskExited"),
+            Msg::ViewportConstrained(..) => write!(f, "ViewportConstrained"),
         }
     }
 }

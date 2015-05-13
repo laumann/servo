@@ -16,8 +16,9 @@ use layers::geometry::DevicePixel;
 use layers::layers::LayerBuffer;
 use msg::constellation_msg::{ConstellationChan, Failure, FrameId, PipelineId, SubpageId};
 use msg::constellation_msg::{LoadData, WindowSizeData, PipelineExitType, MozBrowserEvent};
-use profile::mem;
-use profile::time;
+use msg::compositor_msg::FrameTreeId;
+use profile_traits::mem;
+use profile_traits::time;
 use net_traits::ResourceTask;
 use net_traits::image_cache_task::ImageCacheTask;
 use net_traits::storage_task::StorageTask;
@@ -43,7 +44,7 @@ Choose<PassCompositor,
 
 pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
 pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Var<Z>>;
-pub type Paint             = Send<Vec<PaintRequest>, Var<Z>>;
+pub type Paint             = Send<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
 
 /// A uniquely-identifiable pipeline of script task, layout task, and paint task.
 pub struct Pipeline {
@@ -85,12 +86,12 @@ impl CompositionPipeline {
         });
     }
 
-    pub fn paint(&self, requests: Vec<PaintRequest>) {
+    pub fn paint(&self, requests: Vec<PaintRequest>, frame_tree_id: FrameTreeId) {
         self.with_paint_chan(|paint_chan| {
             paint_chan
                 .sel2()
                 .sel1()
-                .send(requests)
+                .send((requests, frame_tree_id))
                 .zero()
         });
     }
@@ -174,7 +175,7 @@ impl Pipeline {
                                           script_port,
                                           constellation_chan.clone(),
                                           failure.clone(),
-                                          resource_task.clone(),
+                                          resource_task,
                                           storage_task.clone(),
                                           image_cache_task.clone(),
                                           devtools_chan,
@@ -220,7 +221,6 @@ impl Pipeline {
                                   failure,
                                   script_chan.clone(),
                                   layout_to_paint_tx,
-                                  resource_task,
                                   image_cache_task,
                                   font_cache_task,
                                   time_profiler_chan,
@@ -354,7 +354,7 @@ impl Pipeline {
 
         let LayoutControlChan(ref layout_channel) = self.layout_chan;
         let _ = layout_channel.send(
-            LayoutControlMsg::ExitNowMsg(PipelineExitType::PipelineOnly)).unwrap();
+            LayoutControlMsg::ExitNow(PipelineExitType::PipelineOnly)).unwrap();
     }
 
     pub fn to_sendable(&mut self) -> Option<CompositionPipeline> {
@@ -388,9 +388,9 @@ impl Pipeline {
         assert!(opts::experimental_enabled());
 
         let ScriptControlChan(ref script_channel) = self.script_chan;
-        let event = ConstellationControlMsg::MozBrowserEventMsg(self.id,
-                                                                subpage_id,
-                                                                event);
+        let event = ConstellationControlMsg::MozBrowserEvent(self.id,
+                                                             subpage_id,
+                                                             event);
         script_channel.send(event).unwrap();
     }
 }

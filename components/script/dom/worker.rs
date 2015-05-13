@@ -9,7 +9,7 @@ use dom::bindings::codegen::InheritTypes::{EventCast, EventTargetCast};
 use dom::bindings::error::{Fallible, ErrorResult};
 use dom::bindings::error::Error::Syntax;
 use dom::bindings::global::{GlobalRef, GlobalField};
-use dom::bindings::js::{JSRef, Temporary};
+use dom::bindings::js::{JSRef, Rootable, Temporary};
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::structuredclone::StructuredCloneData;
 use dom::bindings::trace::JSTraceable;
@@ -63,8 +63,7 @@ impl Worker {
     // https://www.whatwg.org/html/#dom-worker
     pub fn Constructor(global: GlobalRef, script_url: DOMString) -> Fallible<Temporary<Worker>> {
         // Step 2-4.
-        let worker_url = match UrlParser::new().base_url(&global.get_url())
-                .parse(script_url.as_slice()) {
+        let worker_url = match UrlParser::new().base_url(&global.get_url()).parse(&script_url) {
             Ok(url) => url,
             Err(_) => return Err(Syntax),
         };

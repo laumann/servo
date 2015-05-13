@@ -5,7 +5,7 @@
 extern crate gfx;
 extern crate script_traits;
 extern crate msg;
-extern crate profile;
+extern crate profile_traits;
 extern crate net_traits;
 extern crate url;
 extern crate util;
@@ -19,9 +19,8 @@ extern crate session_types;
 use gfx::font_cache_task::FontCacheTask;
 use gfx::display_list::StackingContext;
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineId, PipelineExitType};
-use profile::mem;
-use profile::time;
-use net_traits::ResourceTask;
+use profile_traits::mem;
+use profile_traits::time;
 use net_traits::image_cache_task::ImageCacheTask;
 use url::Url;
 use script_traits::{ScriptControlChan, OpaqueScriptLayoutChannel};
@@ -32,8 +31,8 @@ use session_types::{Chan, Send, Choose, Var, Z, Eps, Rec};
 
 /// Messages sent to the layout task from the constellation
 pub enum LayoutControlMsg {
-    ExitNowMsg(PipelineExitType),
-    TickAnimationsMsg,
+    ExitNow(PipelineExitType),
+    TickAnimations,
 }
 
 /// A channel wrapper for constellation messages
@@ -55,7 +54,6 @@ pub trait LayoutTaskFactory {
               failure_msg: Failure,
               script_chan: ScriptControlChan,
               paint_chan: Chan<(), Rec<LayoutToPaint>>,
-              resource_task: ResourceTask,
               image_cache_task: ImageCacheTask,
               font_cache_task: FontCacheTask,
               time_profiler_chan: time::ProfilerChan,

@@ -14,7 +14,6 @@ use dom::bindings::utils::{Reflector, reflect_dom_object};
 use util::str::DOMString;
 
 use std::borrow::ToOwned;
-use std::ascii::AsciiExt;
 use std::ptr;
 
 use encoding::types::EncodingRef;
@@ -50,7 +49,7 @@ impl TextEncoder {
     // https://encoding.spec.whatwg.org/#dom-textencoder
     pub fn Constructor(global: GlobalRef,
                        label: DOMString) -> Fallible<Temporary<TextEncoder>> {
-        let encoding = match encoding_from_whatwg_label(label.trim().as_slice().to_ascii_lowercase().as_slice()) {
+        let encoding = match encoding_from_whatwg_label(&label) {
             Some(enc) => enc,
             None => {
                 debug!("Encoding Label Not Supported");
@@ -80,12 +79,12 @@ impl<'a> TextEncoderMethods for JSRef<'a, TextEncoder> {
     #[allow(unsafe_code)]
     fn Encode(self, cx: *mut JSContext, input: USVString) -> *mut JSObject {
         unsafe {
-            let output = self.encoder.encode(input.0.as_slice(), EncoderTrap::Strict).unwrap();
-            let length = output.len() as u32;
+            let encoded = self.encoder.encode(&input.0, EncoderTrap::Strict).unwrap();
+            let length = encoded.len() as u32;
             let js_object: *mut JSObject = JS_NewUint8Array(cx, length);
 
             let js_object_data: *mut uint8_t = JS_GetUint8ArrayData(js_object, cx);
-            ptr::copy_nonoverlapping(js_object_data, output.as_ptr(), length as usize);
+            ptr::copy_nonoverlapping(encoded.as_ptr(), js_object_data, length as usize);
             return js_object;
         }
     }

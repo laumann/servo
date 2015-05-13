@@ -11,9 +11,11 @@ use geom::scale_factor::ScaleFactor;
 use hyper::header::Headers;
 use hyper::method::Method;
 use layers::geometry::DevicePixel;
+use png;
 use util::cursor::Cursor;
 use util::geometry::{PagePx, ViewportPx};
 use std::sync::mpsc::{channel, Sender, Receiver};
+use style::viewport::ViewportConstraints;
 use webdriver_traits::WebDriverScriptCommand;
 use url::Url;
 
@@ -27,7 +29,7 @@ impl ConstellationChan {
     }
 }
 
-#[derive(PartialEq, Eq, Copy, Debug)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub enum IFrameSandboxState {
     IFrameSandboxed,
     IFrameUnsandboxed
@@ -40,7 +42,7 @@ pub struct Failure {
     pub parent_info: Option<(PipelineId, SubpageId)>,
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct WindowSizeData {
     /// The size of the initial layout viewport, before parsing an
     /// http://www.w3.org/TR/css-device-adapt/#initial-viewport
@@ -196,7 +198,7 @@ bitflags! {
 }
 
 /// Specifies the type of focus event that is sent to a pipeline
-#[derive(Copy, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum FocusType {
     Element,    // The first focus message - focus the element itself
     Parent,     // Focusing a parent element (an iframe)
@@ -221,19 +223,31 @@ pub enum Msg {
     /// Requests that the constellation inform the compositor of the a cursor change.
     SetCursor(Cursor),
     /// Dispatch a mozbrowser event to a given iframe. Only available in experimental mode.
-    MozBrowserEventMsg(PipelineId, SubpageId, MozBrowserEvent),
+    MozBrowserEvent(PipelineId, SubpageId, MozBrowserEvent),
     /// Indicates whether this pipeline is currently running animations.
-    ChangeRunningAnimationsState(PipelineId, bool),
+    ChangeRunningAnimationsState(PipelineId, AnimationState),
     /// Requests that the constellation instruct layout to begin a new tick of the animation.
     TickAnimation(PipelineId),
-    // Request that the constellation send the current root pipeline id over a provided channel
+    /// Request that the constellation send the current root pipeline id over a provided channel
     GetRootPipeline(Sender<Option<PipelineId>>),
     /// Notifies the constellation that this frame has received focus.
-    FocusMsg(PipelineId),
+    Focus(PipelineId),
     /// Requests that the constellation retrieve the current contents of the clipboard
     GetClipboardContents(Sender<String>),
-    // Dispatch a webdriver command
-    WebDriverCommandMsg(PipelineId, WebDriverScriptCommand)
+    /// Dispatch a webdriver command
+    WebDriverCommand(PipelineId, WebDriverScriptCommand),
+    /// Notifies the constellation that the viewport has been constrained in some manner
+    ViewportConstrained(PipelineId, ViewportConstraints),
+    /// Create a PNG of the window contents
+    CompositePng(Sender<Option<png::Image>>)
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum AnimationState {
+    AnimationsPresent,
+    AnimationCallbacksPresent,
+    NoAnimationsPresent,
+    NoAnimationCallbacksPresent,
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/API/Using_the_Browser_API#Events
@@ -342,7 +356,7 @@ pub struct SubpageId(pub u32);
 
 // The type of pipeline exit. During complete shutdowns, pipelines do not have to
 // release resources automatically released on process termination.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub enum PipelineExitType {
     PipelineOnly,
     Complete,

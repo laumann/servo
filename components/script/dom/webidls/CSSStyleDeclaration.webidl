@@ -41,7 +41,6 @@ partial interface CSSStyleDeclaration {
   [TreatNullAs=EmptyString] attribute DOMString backgroundSize;
 
   [TreatNullAs=EmptyString] attribute DOMString border;
-  [TreatNullAs=EmptyString] attribute DOMString borderCollapse;
   [TreatNullAs=EmptyString] attribute DOMString borderColor;
   [TreatNullAs=EmptyString] attribute DOMString borderRadius;
   [TreatNullAs=EmptyString] attribute DOMString borderSpacing;
@@ -119,6 +118,7 @@ partial interface CSSStyleDeclaration {
   [TreatNullAs=EmptyString] attribute DOMString overflowWrap;
 
   [TreatNullAs=EmptyString] attribute DOMString tableLayout;
+  [TreatNullAs=EmptyString] attribute DOMString borderCollapse;
   [TreatNullAs=EmptyString] attribute DOMString emptyCells;
   [TreatNullAs=EmptyString] attribute DOMString captionSide;
 
@@ -186,6 +186,11 @@ partial interface CSSStyleDeclaration {
   [TreatNullAs=EmptyString] attribute DOMString zIndex;
 
   [TreatNullAs=EmptyString] attribute DOMString imageRendering;
+
+  [TreatNullAs=EmptyString] attribute DOMString columnCount;
+  [TreatNullAs=EmptyString] attribute DOMString columnWidth;
+  [TreatNullAs=EmptyString] attribute DOMString columns;
+  [TreatNullAs=EmptyString] attribute DOMString columnGap;
 
   [TreatNullAs=EmptyString] attribute DOMString transition;
   [TreatNullAs=EmptyString] attribute DOMString transitionDuration;

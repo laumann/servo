@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use document_loader::{DocumentLoader, LoadType};
 use dom::attr::{Attr, AttrHelpers, AttrValue};
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::DocumentBinding;
@@ -11,8 +12,10 @@ use dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
 use dom::bindings::codegen::Bindings::EventTargetBinding::EventTargetMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilter;
-use dom::bindings::codegen::InheritTypes::{DocumentDerived, EventCast, HTMLElementCast};
-use dom::bindings::codegen::InheritTypes::{HTMLHeadElementCast, ElementCast};
+use dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceMethods;
+use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
+use dom::bindings::codegen::InheritTypes::{DocumentDerived, EventCast, HTMLBodyElementCast};
+use dom::bindings::codegen::InheritTypes::{HTMLElementCast, HTMLHeadElementCast, ElementCast};
 use dom::bindings::codegen::InheritTypes::{DocumentTypeCast, HTMLHtmlElementCast, NodeCast};
 use dom::bindings::codegen::InheritTypes::{EventTargetCast, HTMLAnchorElementCast};
 use dom::bindings::codegen::InheritTypes::{HTMLAnchorElementDerived, HTMLAppletElementDerived};
@@ -24,8 +27,10 @@ use dom::bindings::error::{ErrorResult, Fallible};
 use dom::bindings::error::Error::{NotSupported, InvalidCharacter, Security};
 use dom::bindings::error::Error::HierarchyRequest;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{MutNullableJS, JS, JSRef, LayoutJS, Temporary, TemporaryPushable};
-use dom::bindings::js::{OptionalRootable, RootedReference};
+use dom::bindings::js::{JS, JSRef, LayoutJS, MutNullableHeap};
+use dom::bindings::js::{OptionalRootable, Rootable, RootedReference};
+use dom::bindings::js::Temporary;
+use dom::bindings::js::TemporaryPushable;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::trace::RootedVec;
 use dom::bindings::utils::reflect_dom_object;
@@ -61,11 +66,13 @@ use dom::window::{Window, WindowHelpers, ReflowReason};
 
 use layout_interface::{HitTestResponse, MouseOverResponse};
 use msg::compositor_msg::ScriptListener;
+use msg::constellation_msg::AnimationState;
 use msg::constellation_msg::Msg as ConstellationMsg;
 use msg::constellation_msg::{ConstellationChan, FocusType, Key, KeyState, KeyModifiers, MozBrowserEvent};
 use msg::constellation_msg::{SUPER, ALT, SHIFT, CONTROL};
 use net_traits::CookieSource::NonHTTP;
 use net_traits::ControlMsg::{SetCookiesForUrl, GetCookiesForUrl};
+use net_traits::{Metadata, LoadResponse, PendingAsyncLoad};
 use script_task::Runnable;
 use script_traits::{MouseButton, UntrustedNodeAddress};
 use util::opts;
@@ -79,14 +86,15 @@ use string_cache::{Atom, QualName};
 use url::Url;
 use js::jsapi::JSRuntime;
 
+use num::ToPrimitive;
+use std::iter::FromIterator;
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::ascii::AsciiExt;
-use std::cell::{Cell, Ref};
+use std::cell::{Cell, Ref, RefMut, RefCell};
 use std::default::Default;
-use std::sync::mpsc::channel;
-use std::num::ToPrimitive;
+use std::sync::mpsc::{Receiver, channel};
 use time;
 
 #[derive(PartialEq)]
@@ -102,31 +110,39 @@ pub struct Document {
     node: Node,
     window: JS<Window>,
     idmap: DOMRefCell<HashMap<Atom, Vec<JS<Element>>>>,
-    implementation: MutNullableJS<DOMImplementation>,
-    location: MutNullableJS<Location>,
+    implementation: MutNullableHeap<JS<DOMImplementation>>,
+    location: MutNullableHeap<JS<Location>>,
     content_type: DOMString,
     last_modified: Option<DOMString>,
     encoding_name: DOMRefCell<DOMString>,
     is_html_document: bool,
     url: Url,
     quirks_mode: Cell<QuirksMode>,
-    images: MutNullableJS<HTMLCollection>,
-    embeds: MutNullableJS<HTMLCollection>,
-    links: MutNullableJS<HTMLCollection>,
-    forms: MutNullableJS<HTMLCollection>,
-    scripts: MutNullableJS<HTMLCollection>,
-    anchors: MutNullableJS<HTMLCollection>,
-    applets: MutNullableJS<HTMLCollection>,
+    images: MutNullableHeap<JS<HTMLCollection>>,
+    embeds: MutNullableHeap<JS<HTMLCollection>>,
+    links: MutNullableHeap<JS<HTMLCollection>>,
+    forms: MutNullableHeap<JS<HTMLCollection>>,
+    scripts: MutNullableHeap<JS<HTMLCollection>>,
+    anchors: MutNullableHeap<JS<HTMLCollection>>,
+    applets: MutNullableHeap<JS<HTMLCollection>>,
     ready_state: Cell<DocumentReadyState>,
     /// The element that has most recently requested focus for itself.
-    possibly_focused: MutNullableJS<Element>,
+    possibly_focused: MutNullableHeap<JS<Element>>,
     /// The element that currently has the document focus context.
-    focused: MutNullableJS<Element>,
+    focused: MutNullableHeap<JS<Element>>,
     /// The script element that is currently executing.
-    current_script: MutNullableJS<HTMLScriptElement>,
+    current_script: MutNullableHeap<JS<HTMLScriptElement>>,
     /// https://html.spec.whatwg.org/multipage/#concept-n-noscript
     /// True if scripting is enabled for all scripts in this document
     scripting_enabled: Cell<bool>,
+    /// https://html.spec.whatwg.org/multipage/#animation-frame-callback-identifier
+    /// Current identifier of animation frame callback
+    animation_frame_ident: Cell<i32>,
+    /// https://html.spec.whatwg.org/multipage/#list-of-animation-frame-callbacks
+    /// List of animation frame callbacks
+    animation_frame_list: RefCell<HashMap<i32, Box<Fn(f64)>>>,
+    /// Tracks all outstanding loads related to this document.
+    loader: DOMRefCell<DocumentLoader>,
 }
 
 impl DocumentDerived for EventTarget {
@@ -193,6 +209,8 @@ impl CollectionFilter for AppletsFilter {
 }
 
 pub trait DocumentHelpers<'a> {
+    fn loader(&self) -> Ref<DocumentLoader>;
+    fn mut_loader(&self) -> RefMut<DocumentLoader>;
     fn window(self) -> Temporary<Window>;
     fn encoding_name(self) -> Ref<'a, DOMString>;
     fn is_html_document(self) -> bool;
@@ -218,13 +236,16 @@ pub trait DocumentHelpers<'a> {
     fn title_changed(self);
     fn send_title_to_compositor(self);
     fn dirty_all_nodes(self);
-    fn handle_click_event(self, js_runtime: *mut JSRuntime,
-                          button: MouseButton, point: Point2D<f32>);
     fn dispatch_key_event(self, key: Key, state: KeyState,
         modifiers: KeyModifiers, compositor: &mut Box<ScriptListener+'static>);
     fn node_from_nodes_and_strings(self, nodes: Vec<NodeOrString>)
                                    -> Fallible<Temporary<Node>>;
+    fn get_body_attribute(self, local_name: &Atom) -> DOMString;
+    fn set_body_attribute(self, local_name: &Atom, value: DOMString);
 
+    fn handle_mouse_event(self, js_runtime: *mut JSRuntime,
+                          button: MouseButton, point: Point2D<f32>,
+                          mouse_event_type: MouseEventType);
     /// Handles a mouse-move event coming from the compositor.
     fn handle_mouse_move_event(self,
                                js_runtime: *mut JSRuntime,
@@ -233,12 +254,32 @@ pub trait DocumentHelpers<'a> {
 
     fn set_current_script(self, script: Option<JSRef<HTMLScriptElement>>);
     fn trigger_mozbrowser_event(self, event: MozBrowserEvent);
+    /// http://w3c.github.io/animation-timing/#dom-windowanimationtiming-requestanimationframe
+    fn request_animation_frame(self, callback: Box<Fn(f64, )>) -> i32;
+    /// http://w3c.github.io/animation-timing/#dom-windowanimationtiming-cancelanimationframe
+    fn cancel_animation_frame(self, ident: i32);
+    /// http://w3c.github.io/animation-timing/#dfn-invoke-callbacks-algorithm
+    fn invoke_animation_callbacks(self);
+    fn prepare_async_load(self, load: LoadType) -> PendingAsyncLoad;
+    fn load_async(self, load: LoadType) -> Receiver<LoadResponse>;
+    fn load_sync(self, load: LoadType) -> Result<(Metadata, Vec<u8>), String>;
+    fn finish_load(self, load: LoadType);
 }
 
 impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
     #[inline]
+    fn loader(&self) -> Ref<DocumentLoader> {
+        self.loader.borrow()
+    }
+
+    #[inline]
+    fn mut_loader(&self) -> RefMut<DocumentLoader> {
+        self.loader.borrow_mut()
+    }
+
+    #[inline]
     fn window(self) -> Temporary<Window> {
-        Temporary::new(self.window)
+        Temporary::from_rooted(self.window)
     }
 
     #[inline]
@@ -337,7 +378,7 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
 
         match idmap.entry(id) {
             Vacant(entry) => {
-                entry.insert(vec!(element.unrooted()));
+                entry.insert(vec![JS::from_rooted(element)]);
             }
             Occupied(entry) => {
                 let elements = entry.into_mut();
@@ -377,7 +418,7 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
                     // FIXME(https://github.com/rust-lang/rust/issues/23338)
                     let attr = attr.r();
                     let value = attr.value();
-                    value.as_slice() == fragid.as_slice()
+                    &**value == &*fragid
                 })
             };
             let doc_node: JSRef<Node> = NodeCast::from_ref(self);
@@ -440,19 +481,19 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
     /// Return the element that currently has focus.
     // https://dvcs.w3.org/hg/dom3events/raw-file/tip/html/DOM3-Events.html#events-focusevent-doc-focus
     fn get_focused_element(self) -> Option<Temporary<Element>> {
-        self.focused.get()
+        self.focused.get().map(Temporary::from_rooted)
     }
 
     /// Initiate a new round of checking for elements requesting focus. The last element to call
     /// `request_focus` before `commit_focus_transaction` is called will receive focus.
     fn begin_focus_transaction(self) {
-        self.possibly_focused.clear();
+        self.possibly_focused.set(None);
     }
 
     /// Request that the given element receive focus once the current transaction is complete.
     fn request_focus(self, elem: JSRef<Element>) {
         if elem.is_focusable_area() {
-            self.possibly_focused.assign(Some(elem))
+            self.possibly_focused.set(Some(JS::from_rooted(elem)))
         }
     }
 
@@ -466,7 +507,7 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
             node.set_focus_state(false);
         }
 
-        self.focused.assign(self.possibly_focused.get());
+        self.focused.set(self.possibly_focused.get());
 
         if let Some(ref elem) = self.focused.get().root() {
             let node: JSRef<Node> = NodeCast::from_ref(elem.r());
@@ -477,7 +518,7 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
             if focus_type == FocusType::Element {
                 let window = self.window.root();
                 let ConstellationChan(ref chan) = window.r().constellation_chan();
-                let event = ConstellationMsg::FocusMsg(window.r().pipeline());
+                let event = ConstellationMsg::Focus(window.r().pipeline());
                 chan.send(event).unwrap();
             }
         }
@@ -507,9 +548,15 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         }
     }
 
-    fn handle_click_event(self, js_runtime: *mut JSRuntime,
-                          _button: MouseButton, point: Point2D<f32>) {
-        debug!("ClickEvent: clicked at {:?}", point);
+    fn handle_mouse_event(self, js_runtime: *mut JSRuntime,
+                          _button: MouseButton, point: Point2D<f32>,
+                          mouse_event_type: MouseEventType) {
+        let mouse_event_type_string = match mouse_event_type {
+            MouseEventType::Click => "click".to_owned(),
+            MouseEventType::MouseUp => "mouseup".to_owned(),
+            MouseEventType::MouseDown => "mousedown".to_owned(),
+        };
+        debug!("{}: at {:?}", mouse_event_type_string, point);
         let node = match self.hit_test(&point) {
             Some(node_address) => {
                 debug!("node address is {:?}", node_address.0);
@@ -521,7 +568,7 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         let el = match ElementCast::to_ref(node.r()) {
             Some(el) => Temporary::from_rooted(el),
             None => {
-                let parent = node.r().parent_node();
+                let parent = node.r().GetParentNode();
                 match parent.and_then(ElementCast::to_temporary) {
                     Some(parent) => parent,
                     None => return,
@@ -530,13 +577,15 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         }.root();
 
         let node: JSRef<Node> = NodeCast::from_ref(el.r());
-        debug!("clicked on {:?}", node.debug_str());
+        debug!("{} on {:?}", mouse_event_type_string, node.debug_str());
         // Prevent click event if form control element is disabled.
-        if node.click_event_filter_by_disabled_state() {
-            return;
-        }
+        if let  MouseEventType::Click = mouse_event_type {
+            if node.click_event_filter_by_disabled_state() {
+                return;
+            }
 
-        self.begin_focus_transaction();
+            self.begin_focus_transaction();
+        }
 
         let window = self.window.root();
 
@@ -544,7 +593,7 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         let x = point.x as i32;
         let y = point.y as i32;
         let event = MouseEvent::new(window.r(),
-                                    "click".to_owned(),
+                                    mouse_event_type_string,
                                     EventBubbles::Bubbles,
                                     EventCancelable::Cancelable,
                                     Some(window.r()),
@@ -558,9 +607,17 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         // https://dvcs.w3.org/hg/dom3events/raw-file/tip/html/DOM3-Events.html#trusted-events
         event.set_trusted(true);
         // https://html.spec.whatwg.org/multipage/#run-authentic-click-activation-steps
-        el.r().authentic_click_activation(event);
+        match mouse_event_type {
+            MouseEventType::Click => el.r().authentic_click_activation(event),
+            _ =>  {
+                let target: JSRef<EventTarget> = EventTargetCast::from_ref(node);
+                event.fire(target);
+            },
+        }
 
-        self.commit_focus_transaction(FocusType::Element);
+        if let MouseEventType::Click = mouse_event_type {
+            self.commit_focus_transaction(FocusType::Element);
+        }
         window.r().reflow(ReflowGoal::ForDisplay, ReflowQueryType::NoQuery, ReflowReason::MouseEvent);
     }
 
@@ -664,8 +721,8 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         let props = KeyboardEvent::key_properties(key, modifiers);
 
         let keyevent = KeyboardEvent::new(window.r(), ev_type, true, true,
-                                          Some(window.r()), 0,
-                                          props.key.to_owned(), props.code.to_owned(),
+                                          Some(window.r()), 0, Some(key),
+                                          props.key_string.to_owned(), props.code.to_owned(),
                                           props.location, is_repeating, is_composing,
                                           ctrl, alt, shift, meta,
                                           None, props.key_code).root();
@@ -677,8 +734,8 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         if state != KeyState::Released && props.is_printable() && !prevented {
             // https://dvcs.w3.org/hg/dom3events/raw-file/tip/html/DOM3-Events.html#keypress-event-order
             let event = KeyboardEvent::new(window.r(), "keypress".to_owned(),
-                                           true, true, Some(window.r()),
-                                           0, props.key.to_owned(), props.code.to_owned(),
+                                           true, true, Some(window.r()), 0, Some(key),
+                                            props.key_string.to_owned(), props.code.to_owned(),
                                            props.location, is_repeating, is_composing,
                                            ctrl, alt, shift, meta,
                                            props.char_code, 0).root();
@@ -740,8 +797,23 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
         }
     }
 
+    fn get_body_attribute(self, local_name: &Atom) -> DOMString {
+        match self.GetBody().and_then(HTMLBodyElementCast::to_temporary).root() {
+            Some(ref body) => {
+                ElementCast::from_ref(body.r()).get_string_attribute(local_name)
+            },
+            None => "".to_owned()
+        }
+    }
+
+    fn set_body_attribute(self, local_name: &Atom, value: DOMString) {
+        if let Some(ref body) = self.GetBody().and_then(HTMLBodyElementCast::to_temporary).root() {
+            ElementCast::from_ref(body.r()).set_string_attribute(local_name, value);
+        }
+    }
+
     fn set_current_script(self, script: Option<JSRef<HTMLScriptElement>>) {
-        self.current_script.assign(script);
+        self.current_script.set(script.map(JS::from_rooted));
     }
 
     fn trigger_mozbrowser_event(self, event: MozBrowserEvent) {
@@ -750,13 +822,94 @@ impl<'a> DocumentHelpers<'a> for JSRef<'a, Document> {
 
             if let Some((containing_pipeline_id, subpage_id)) = window.r().parent_info() {
                 let ConstellationChan(ref chan) = window.r().constellation_chan();
-                let event = ConstellationMsg::MozBrowserEventMsg(containing_pipeline_id,
-                                                                 subpage_id,
-                                                                 event);
+                let event = ConstellationMsg::MozBrowserEvent(containing_pipeline_id,
+                                                              subpage_id,
+                                                              event);
                 chan.send(event).unwrap();
             }
         }
     }
+
+    /// http://w3c.github.io/animation-timing/#dom-windowanimationtiming-requestanimationframe
+    fn request_animation_frame(self, callback: Box<Fn(f64, )>) -> i32 {
+        let window = self.window.root();
+        let window = window.r();
+        let ident = self.animation_frame_ident.get() + 1;
+
+        self.animation_frame_ident.set(ident);
+        self.animation_frame_list.borrow_mut().insert(ident, callback);
+
+        // TODO: Should tick animation only when document is visible
+        let ConstellationChan(ref chan) = window.constellation_chan();
+        let event = ConstellationMsg::ChangeRunningAnimationsState(window.pipeline(),
+                                                                   AnimationState::AnimationCallbacksPresent);
+        chan.send(event).unwrap();
+
+        ident
+    }
+
+    /// http://w3c.github.io/animation-timing/#dom-windowanimationtiming-cancelanimationframe
+    fn cancel_animation_frame(self, ident: i32) {
+        self.animation_frame_list.borrow_mut().remove(&ident);
+        if self.animation_frame_list.borrow().len() == 0 {
+            let window = self.window.root();
+            let window = window.r();
+            let ConstellationChan(ref chan) = window.constellation_chan();
+            let event = ConstellationMsg::ChangeRunningAnimationsState(window.pipeline(),
+                                                                       AnimationState::NoAnimationCallbacksPresent);
+            chan.send(event).unwrap();
+        }
+    }
+
+    /// http://w3c.github.io/animation-timing/#dfn-invoke-callbacks-algorithm
+    fn invoke_animation_callbacks(self) {
+        let animation_frame_list;
+        {
+            let mut list = self.animation_frame_list.borrow_mut();
+            animation_frame_list = Vec::from_iter(list.drain());
+
+            let window = self.window.root();
+            let window = window.r();
+            let ConstellationChan(ref chan) = window.constellation_chan();
+            let event = ConstellationMsg::ChangeRunningAnimationsState(window.pipeline(),
+                                                                       AnimationState::NoAnimationCallbacksPresent);
+            chan.send(event).unwrap();
+        }
+        let window = self.window.root();
+        let window = window.r();
+        let performance = window.Performance().root();
+        let performance = performance.r();
+
+        for (_, callback) in animation_frame_list {
+            callback(*performance.Now());
+        }
+    }
+
+    fn prepare_async_load(self, load: LoadType) -> PendingAsyncLoad {
+        let mut loader = self.loader.borrow_mut();
+        loader.prepare_async_load(load)
+    }
+
+    fn load_async(self, load: LoadType) -> Receiver<LoadResponse> {
+        let mut loader = self.loader.borrow_mut();
+        loader.load_async(load)
+    }
+
+    fn load_sync(self, load: LoadType) -> Result<(Metadata, Vec<u8>), String> {
+        let mut loader = self.loader.borrow_mut();
+        loader.load_sync(load)
+    }
+
+    fn finish_load(self, load: LoadType) {
+        let mut loader = self.loader.borrow_mut();
+        loader.finish_load(load);
+    }
+}
+
+pub enum MouseEventType {
+    Click,
+    MouseDown,
+    MouseUp,
 }
 
 #[derive(PartialEq)]
@@ -785,7 +938,8 @@ impl Document {
                      is_html_document: IsHTMLDocument,
                      content_type: Option<DOMString>,
                      last_modified: Option<DOMString>,
-                     source: DocumentSource) -> Document {
+                     source: DocumentSource,
+                     doc_loader: DocumentLoader) -> Document {
         let url = url.unwrap_or_else(|| Url::parse("about:blank").unwrap());
 
         let ready_state = if source == DocumentSource::FromParser {
@@ -828,14 +982,21 @@ impl Document {
             focused: Default::default(),
             current_script: Default::default(),
             scripting_enabled: Cell::new(true),
+            animation_frame_ident: Cell::new(0),
+            animation_frame_list: RefCell::new(HashMap::new()),
+            loader: DOMRefCell::new(doc_loader),
         }
     }
 
     // https://dom.spec.whatwg.org/#dom-document
     pub fn Constructor(global: GlobalRef) -> Fallible<Temporary<Document>> {
-        Ok(Document::new(global.as_window(), None,
+        let win = global.as_window();
+        let doc = win.Document().root();
+        let doc = doc.r();
+        let docloader = DocumentLoader::new(&*doc.loader());
+        Ok(Document::new(win, None,
                          IsHTMLDocument::NonHTMLDocument, None,
-                         None, DocumentSource::NotFromParser))
+                         None, DocumentSource::NotFromParser, docloader))
     }
 
     pub fn new(window: JSRef<Window>,
@@ -843,10 +1004,11 @@ impl Document {
                doctype: IsHTMLDocument,
                content_type: Option<DOMString>,
                last_modified: Option<DOMString>,
-               source: DocumentSource) -> Temporary<Document> {
+               source: DocumentSource,
+               doc_loader: DocumentLoader) -> Temporary<Document> {
         let document = reflect_dom_object(box Document::new_inherited(window, url, doctype,
                                                                       content_type, last_modified,
-                                                                      source),
+                                                                      source, doc_loader),
                                           GlobalRef::Window(window),
                                           DocumentBinding::Wrap).root();
 
@@ -870,7 +1032,7 @@ impl<'a> PrivateDocumentHelpers for JSRef<'a, Document> {
             for node in NodeCast::from_ref(root.r()).traverse_preorder() {
                 let node = node.root();
                 if callback(node.r()) {
-                    nodes.push(node.r().unrooted());
+                    nodes.push(JS::from_rooted(node.r()));
                 }
             }
         };
@@ -1000,7 +1162,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
         let id = Atom::from_slice(&id);
         // FIXME(https://github.com/rust-lang/rust/issues/23338)
         let idmap = self.idmap.borrow();
-        idmap.get(&id).map(|ref elements| Temporary::new((*elements)[0].clone()))
+        idmap.get(&id).map(|ref elements| Temporary::from_rooted((*elements)[0].clone()))
     }
 
     // https://dom.spec.whatwg.org/#dom-document-createelement
@@ -1120,7 +1282,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
     fn CreateEvent(self, interface: DOMString) -> Fallible<Temporary<Event>> {
         let window = self.window.root();
 
-        match interface.to_ascii_lowercase().as_slice() {
+        match &*interface.to_ascii_lowercase() {
             "uievents" | "uievent" => Ok(EventCast::from_temporary(
                 UIEvent::new_uninitialized(window.r()))),
             "mouseevents" | "mouseevent" => Ok(EventCast::from_temporary(
@@ -1147,7 +1309,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
 
     // https://dom.spec.whatwg.org/#dom-document-createrange
     fn CreateRange(self) -> Temporary<Range> {
-        Range::new(self)
+        Range::new_with_doc(self)
     }
 
     // https://dom.spec.whatwg.org/#dom-document-createtreewalker
@@ -1176,7 +1338,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
 
         match title {
             None => DOMString::new(),
-            Some(title) => {
+            Some(ref title) => {
                 // Steps 3-4.
                 let value = Node::collect_text_contents(title.r().children());
                 split_html_space_chars(&value).collect::<Vec<_>>().connect(" ")
@@ -1250,7 +1412,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
 
     // https://html.spec.whatwg.org/#dom-document-currentscript
     fn GetCurrentScript(self) -> Option<Temporary<HTMLScriptElement>> {
-        self.current_script.get()
+        self.current_script.get().map(Temporary::from_rooted)
     }
 
     // https://html.spec.whatwg.org/#dom-document-body
@@ -1291,9 +1453,9 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
             return Ok(());
         }
 
-        match (self.get_html_element().root(), old_body) {
+        match (self.get_html_element().root(), &old_body) {
             // Step 3.
-            (Some(ref root), Some(ref child)) => {
+            (Some(ref root), &Some(ref child)) => {
                 let root: JSRef<Node> = NodeCast::from_ref(root.r());
                 let child: JSRef<Node> = NodeCast::from_ref(child.r());
                 let new_body: JSRef<Node> = NodeCast::from_ref(new_body);
@@ -1304,7 +1466,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
             (None, _) => return Err(HierarchyRequest),
 
             // Step 5.
-            (Some(ref root), None) => {
+            (Some(ref root), &None) => {
                 let root: JSRef<Node> = NodeCast::from_ref(root.r());
                 let new_body: JSRef<Node> = NodeCast::from_ref(new_body);
                 assert!(root.AppendChild(new_body).is_ok());
@@ -1324,7 +1486,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
                 // FIXME(https://github.com/rust-lang/rust/issues/23338)
                 let attr = attr.r();
                 let value = attr.value();
-                value.as_slice() == name.as_slice()
+                &**value == &*name
             })
         })
     }
@@ -1462,7 +1624,7 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
 
     // https://html.spec.whatwg.org/multipage/#dom-document-defaultview
     fn DefaultView(self) -> Temporary<Window> {
-        Temporary::new(self.window)
+        Temporary::from_rooted(self.window)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-document-cookie
@@ -1489,6 +1651,14 @@ impl<'a> DocumentMethods for JSRef<'a, Document> {
         let window = self.window.root();
         let _ = window.r().resource_task().send(SetCookiesForUrl(url, cookie, NonHTTP));
         Ok(())
+    }
+
+    fn BgColor(self) -> DOMString {
+        self.get_body_attribute(&atom!("bgcolor"))
+    }
+
+    fn SetBgColor(self, value: DOMString) {
+        self.set_body_attribute(&atom!("bgcolor"), value)
     }
 
     global_event_handlers!();

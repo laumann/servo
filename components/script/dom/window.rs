@@ -3,17 +3,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use dom::bindings::cell::DOMRefCell;
+use dom::bindings::callback::ExceptionHandling;
 use dom::bindings::codegen::Bindings::EventHandlerBinding::{OnErrorEventHandlerNonNull, EventHandlerNonNull};
-use dom::bindings::codegen::Bindings::FunctionBinding::Function;
-use dom::bindings::codegen::Bindings::WindowBinding;
-use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
+use dom::bindings::codegen::Bindings::FunctionBinding::Function;
+use dom::bindings::codegen::Bindings::WindowBinding::{self, WindowMethods, FrameRequestCallback};
 use dom::bindings::codegen::InheritTypes::{NodeCast, EventTargetCast};
 use dom::bindings::global::global_object_for_js_object;
 use dom::bindings::error::{report_pending_exception, Fallible};
 use dom::bindings::error::Error::InvalidCharacter;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{MutNullableJS, JSRef, Temporary, OptionalRootable, RootedReference};
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, OptionalRootable};
+use dom::bindings::js::{Rootable, RootedReference, Temporary};
+use dom::bindings::num::Finite;
 use dom::bindings::utils::{GlobalStaticData, Reflectable, WindowProxyHandler};
 use dom::browsercontext::BrowserContext;
 use dom::console::Console;
@@ -49,7 +51,7 @@ use js::jsapi::JS_EvaluateUCScript;
 use js::jsapi::JSContext;
 use js::jsapi::{JS_GC, JS_GetRuntime};
 use js::jsval::{JSVal, UndefinedValue};
-use js::rust::{Cx, with_compartment};
+use js::rust::{Runtime, with_compartment};
 use url::{Url, UrlParser};
 
 use libc;
@@ -60,7 +62,6 @@ use std::collections::HashSet;
 use std::default::Default;
 use std::ffi::CString;
 use std::mem;
-use std::num::Float;
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::mpsc::TryRecvError::{Empty, Disconnected};
@@ -87,19 +88,19 @@ pub struct Window {
     eventtarget: EventTarget,
     script_chan: Box<ScriptChan+Send>,
     control_chan: ScriptControlChan,
-    console: MutNullableJS<Console>,
-    navigator: MutNullableJS<Navigator>,
+    console: MutNullableHeap<JS<Console>>,
+    navigator: MutNullableHeap<JS<Navigator>>,
     image_cache_task: ImageCacheTask,
     image_cache_chan: ImageCacheChan,
     compositor: DOMRefCell<Box<ScriptListener+'static>>,
     browser_context: DOMRefCell<Option<BrowserContext>>,
     page: Rc<Page>,
-    performance: MutNullableJS<Performance>,
+    performance: MutNullableHeap<JS<Performance>>,
     navigation_start: u64,
     navigation_start_precise: f64,
-    screen: MutNullableJS<Screen>,
-    session_storage: MutNullableJS<Storage>,
-    local_storage: MutNullableJS<Storage>,
+    screen: MutNullableHeap<JS<Screen>>,
+    session_storage: MutNullableHeap<JS<Storage>>,
+    local_storage: MutNullableHeap<JS<Storage>>,
     timers: TimerManager,
 
     next_worker_id: Cell<WorkerId>,
@@ -132,8 +133,8 @@ pub struct Window {
     /// Global static data related to the DOM.
     dom_static: GlobalStaticData,
 
-    /// The JavaScript context.
-    js_context: DOMRefCell<Option<Rc<Cx>>>,
+    /// The JavaScript runtime.
+    js_runtime: DOMRefCell<Option<Rc<Runtime>>>,
 
     /// A handle for communicating messages to the layout task.
     layout_chan: LayoutChan,
@@ -169,15 +170,15 @@ pub struct Window {
 
 impl Window {
     #[allow(unsafe_code)]
-    pub fn clear_js_context_for_script_deallocation(&self) {
+    pub fn clear_js_runtime_for_script_deallocation(&self) {
         unsafe {
-            *self.js_context.borrow_for_script_deallocation() = None;
+            *self.js_runtime.borrow_for_script_deallocation() = None;
             *self.browser_context.borrow_for_script_deallocation() = None;
         }
     }
 
     pub fn get_cx(&self) -> *mut JSContext {
-        self.js_context.borrow().as_ref().unwrap().ptr
+        self.js_runtime.borrow().as_ref().unwrap().cx()
     }
 
     pub fn script_chan(&self) -> Box<ScriptChan+Send> {
@@ -253,7 +254,7 @@ pub fn base64_btoa(input: DOMString) -> Fallible<DOMString> {
 
         // "and then must apply the base64 algorithm to that sequence of
         //  octets, and return the result. [RFC4648]"
-        Ok(octets.as_slice().to_base64(STANDARD))
+        Ok(octets.to_base64(STANDARD))
     }
 }
 
@@ -269,7 +270,7 @@ pub fn base64_atob(input: DOMString) -> Fallible<DOMString> {
     let without_spaces = input.chars()
         .filter(|&c| ! is_html_space(c))
         .collect::<String>();
-    let mut input = without_spaces.as_slice();
+    let mut input = &*without_spaces;
 
     // "If the length of input divides by 4 leaving no remainder, then:
     //  if input ends with one or two U+003D EQUALS SIGN (=) characters,
@@ -464,13 +465,32 @@ impl<'a> WindowMethods for JSRef<'a, Window> {
     fn Atob(self, atob: DOMString) -> Fallible<DOMString> {
         base64_atob(atob)
     }
+
+    /// http://w3c.github.io/animation-timing/#dom-windowanimationtiming-requestanimationframe
+    fn RequestAnimationFrame(self, callback: FrameRequestCallback) -> i32 {
+        let doc = self.Document().root();
+
+        let callback  = move |now: f64| {
+            // TODO: @jdm The spec says that any exceptions should be suppressed;
+            callback.Call__(Finite::wrap(now), ExceptionHandling::Report).unwrap();
+        };
+
+        doc.r().request_animation_frame(Box::new(callback))
+    }
+
+    /// http://w3c.github.io/animation-timing/#dom-windowanimationtiming-cancelanimationframe
+    fn CancelAnimationFrame(self, ident: i32) {
+        let doc = self.Document().root();
+        doc.r().cancel_animation_frame(ident);
+    }
 }
 
 pub trait WindowHelpers {
-    fn clear_js_context(self);
+    fn clear_js_runtime(self);
     fn init_browser_context(self, doc: JSRef<Document>, frame_element: Option<JSRef<Element>>);
     fn load_url(self, href: DOMString);
     fn handle_fire_timer(self, timer_id: TimerId);
+    fn force_reflow(self, goal: ReflowGoal, query_type: ReflowQueryType, reason: ReflowReason);
     fn reflow(self, goal: ReflowGoal, query_type: ReflowQueryType, reason: ReflowReason);
     fn join_layout(self);
     fn layout(&self) -> &LayoutRPC;
@@ -520,7 +540,7 @@ impl<'a, T: Reflectable> ScriptHelpers for JSRef<'a, T> {
         let this = self.reflector().get_jsobject();
         let cx = global_object_for_js_object(this).root().r().get_cx();
         let global = global_object_for_js_object(this).root().r().reflector().get_jsobject();
-        let code: Vec<u16> = code.as_slice().utf16_units().collect();
+        let code: Vec<u16> = code.utf16_units().collect();
         let mut rval = UndefinedValue();
         let filename = CString::new(filename).unwrap();
 
@@ -539,32 +559,27 @@ impl<'a, T: Reflectable> ScriptHelpers for JSRef<'a, T> {
 }
 
 impl<'a> WindowHelpers for JSRef<'a, Window> {
-    fn clear_js_context(self) {
+    fn clear_js_runtime(self) {
         let document = self.Document().root();
         NodeCast::from_ref(document.r()).teardown();
 
-        *self.js_context.borrow_mut() = None;
+        *self.js_runtime.borrow_mut() = None;
         *self.browser_context.borrow_mut() = None;
     }
 
-    /// Reflows the page if it's possible to do so and the page is dirty. This method will wait
-    /// for the layout thread to complete (but see the `TODO` below). If there is no window size
-    /// yet, the page is presumed invisible and no reflow is performed.
+    /// Reflows the page unconditionally. This method will wait for the layout thread to complete
+    /// (but see the `TODO` below). If there is no window size yet, the page is presumed invisible
+    /// and no reflow is performed.
     ///
     /// TODO(pcwalton): Only wait for style recalc, since we have off-main-thread layout.
-    fn reflow(self, goal: ReflowGoal, query_type: ReflowQueryType, reason: ReflowReason) {
+    fn force_reflow(self, goal: ReflowGoal, query_type: ReflowQueryType, reason: ReflowReason) {
         let document = self.Document().root();
         let root = document.r().GetDocumentElement().root();
         let root = match root.r() {
             Some(root) => root,
             None => return,
         };
-
         let root: JSRef<Node> = NodeCast::from_ref(root);
-        if query_type == ReflowQueryType::NoQuery && !root.get_has_dirty_descendants() {
-            debug!("root has no dirty descendants; avoiding reflow (reason {:?})", reason);
-            return
-        }
 
         let window_size = match self.window_size.get() {
             Some(window_size) => window_size,
@@ -621,6 +636,28 @@ impl<'a> WindowHelpers for JSRef<'a, Window> {
             let marker = TimelineMarker::new("Reflow".to_owned(), TracingMetadata::IntervalEnd);
             self.emit_timeline_marker(marker);
         }
+    }
+
+    /// Reflows the page if it's possible to do so and the page is dirty. This method will wait
+    /// for the layout thread to complete (but see the `TODO` below). If there is no window size
+    /// yet, the page is presumed invisible and no reflow is performed.
+    ///
+    /// TODO(pcwalton): Only wait for style recalc, since we have off-main-thread layout.
+    fn reflow(self, goal: ReflowGoal, query_type: ReflowQueryType, reason: ReflowReason) {
+        let document = self.Document().root();
+        let root = document.r().GetDocumentElement().root();
+        let root = match root.r() {
+            Some(root) => root,
+            None => return,
+        };
+
+        let root: JSRef<Node> = NodeCast::from_ref(root);
+        if query_type == ReflowQueryType::NoQuery && !root.get_has_dirty_descendants() {
+            debug!("root has no dirty descendants; avoiding reflow (reason {:?})", reason);
+            return
+        }
+
+        self.force_reflow(goal, query_type, reason)
     }
 
     // FIXME(cgaebel): join_layout is racey. What if the compositor triggers a
@@ -846,7 +883,7 @@ impl<'a> WindowHelpers for JSRef<'a, Window> {
 }
 
 impl Window {
-    pub fn new(js_context: Rc<Cx>,
+    pub fn new(runtime: Rc<Runtime>,
                page: Rc<Page>,
                script_chan: Box<ScriptChan+Send>,
                image_cache_chan: ImageCacheChan,
@@ -892,7 +929,7 @@ impl Window {
             id: id,
             parent_info: parent_info,
             dom_static: GlobalStaticData::new(),
-            js_context: DOMRefCell::new(Some(js_context.clone())),
+            js_runtime: DOMRefCell::new(Some(runtime.clone())),
             resource_task: resource_task,
             storage_task: storage_task,
             constellation_chan: constellation_chan,
@@ -912,15 +949,15 @@ impl Window {
             devtools_wants_updates: Cell::new(false),
         };
 
-        WindowBinding::Wrap(js_context.ptr, win)
+        WindowBinding::Wrap(runtime.cx(), win)
     }
 }
 
 fn should_move_clip_rect(clip_rect: Rect<Au>, new_viewport: Rect<f32>) -> bool{
-    let clip_rect = Rect(Point2D(geometry::to_frac_px(clip_rect.origin.x) as f32,
-                                 geometry::to_frac_px(clip_rect.origin.y) as f32),
-                         Size2D(geometry::to_frac_px(clip_rect.size.width) as f32,
-                                geometry::to_frac_px(clip_rect.size.height) as f32));
+    let clip_rect = Rect(Point2D(clip_rect.origin.x.to_f32_px(),
+                                 clip_rect.origin.y.to_f32_px()),
+                         Size2D(clip_rect.size.width.to_f32_px(),
+                                clip_rect.size.height.to_f32_px()));
 
     // We only need to move the clip rect if the viewport is getting near the edge of
     // our preexisting clip rect. We use half of the size of the viewport as a heuristic

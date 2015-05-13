@@ -4,7 +4,6 @@
 
 use png;
 use stb_image::image as stb_image2;
-use std::iter::range_step;
 use util::vec::byte_swap;
 
 // FIXME: Images must not be copied every frame. Instead we should atomically
@@ -14,7 +13,7 @@ pub type Image = png::Image;
 // TODO(pcwalton): Speed up with SIMD, or better yet, find some way to not do this.
 fn byte_swap_and_premultiply(data: &mut [u8]) {
     let length = data.len();
-    for i in range_step(0, length, 4) {
+    for i in (0..length).step_by(4) {
         let r = data[i + 2];
         let g = data[i + 1];
         let b = data[i + 0];
@@ -34,9 +33,9 @@ pub fn load_from_memory(buffer: &[u8]) -> Option<Image> {
         match png::load_png_from_memory(buffer) {
             Ok(mut png_image) => {
                 match png_image.pixels {
-                    png::PixelsByColorType::RGB8(ref mut data) => byte_swap(data.as_mut_slice()),
+                    png::PixelsByColorType::RGB8(ref mut data) => byte_swap(data),
                     png::PixelsByColorType::RGBA8(ref mut data) => {
-                        byte_swap_and_premultiply(data.as_mut_slice())
+                        byte_swap_and_premultiply(data)
                     }
                     _ => {}
                 }
@@ -54,9 +53,9 @@ pub fn load_from_memory(buffer: &[u8]) -> Option<Image> {
                 assert!(image.depth == 4);
                 // handle gif separately because the alpha-channel has to be premultiplied
                 if is_gif(buffer) {
-                    byte_swap_and_premultiply(image.data.as_mut_slice());
+                    byte_swap_and_premultiply(&mut image.data);
                 } else {
-                    byte_swap(image.data.as_mut_slice());
+                    byte_swap(&mut image.data);
                 }
                 Some(png::Image {
                     width: image.width as u32,

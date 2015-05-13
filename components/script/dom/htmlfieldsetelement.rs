@@ -8,7 +8,7 @@ use dom::bindings::codegen::Bindings::HTMLFieldSetElementBinding;
 use dom::bindings::codegen::Bindings::HTMLFieldSetElementBinding::HTMLFieldSetElementMethods;
 use dom::bindings::codegen::InheritTypes::{HTMLFieldSetElementDerived, NodeCast};
 use dom::bindings::codegen::InheritTypes::{HTMLElementCast, HTMLLegendElementDerived};
-use dom::bindings::js::{JSRef, Temporary, RootedReference};
+use dom::bindings::js::{JSRef, Rootable, RootedReference, Temporary};
 use dom::document::Document;
 use dom::element::{AttributeHandlers, Element, ElementHelpers};
 use dom::eventtarget::{EventTarget, EventTargetTypeId};
@@ -56,7 +56,7 @@ impl<'a> HTMLFieldSetElementMethods for JSRef<'a, HTMLFieldSetElement> {
             fn filter<'a>(&self, elem: JSRef<'a, Element>, _root: JSRef<'a, Node>) -> bool {
                 static TAG_NAMES: StaticStringVec = &["button", "fieldset", "input",
                     "keygen", "object", "output", "select", "textarea"];
-                TAG_NAMES.iter().any(|&tag_name| tag_name == elem.local_name().as_slice())
+                TAG_NAMES.iter().any(|&tag_name| tag_name == &**elem.local_name())
             }
         }
         let node: JSRef<Node> = NodeCast::from_ref(self);

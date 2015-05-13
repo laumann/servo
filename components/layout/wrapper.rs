@@ -39,14 +39,14 @@ use incremental::RestyleDamage;
 use data::{LayoutDataAccess, LayoutDataFlags, LayoutDataWrapper, PrivateLayoutData};
 use opaque_node::OpaqueNodeMethods;
 
-use cssparser::RGBA;
 use gfx::display_list::OpaqueNode;
+use script::dom::attr::AttrValue;
 use script::dom::bindings::codegen::InheritTypes::{CharacterDataCast, ElementCast};
 use script::dom::bindings::codegen::InheritTypes::{HTMLIFrameElementCast, HTMLCanvasElementCast};
 use script::dom::bindings::codegen::InheritTypes::{HTMLImageElementCast, HTMLInputElementCast};
 use script::dom::bindings::codegen::InheritTypes::{HTMLTextAreaElementCast, NodeCast, TextCast};
 use script::dom::bindings::js::LayoutJS;
-use script::dom::characterdata::LayoutCharacterDataHelpers;
+use script::dom::characterdata::{CharacterDataTypeId, LayoutCharacterDataHelpers};
 use script::dom::element::{Element, ElementTypeId};
 use script::dom::element::{LayoutElementHelpers, RawLayoutElementHelpers};
 use script::dom::htmlelement::HTMLElementTypeId;
@@ -61,7 +61,7 @@ use script::dom::node::{HAS_CHANGED, IS_DIRTY, HAS_DIRTY_SIBLINGS, HAS_DIRTY_DES
 use script::dom::text::Text;
 use script::layout_interface::LayoutChan;
 use msg::constellation_msg::{PipelineId, SubpageId};
-use util::str::{LengthOrPercentageOrAuto, is_whitespace};
+use util::str::is_whitespace;
 use std::borrow::ToOwned;
 use std::cell::{Ref, RefMut};
 use std::marker::PhantomData;
@@ -70,11 +70,12 @@ use std::sync::mpsc::Sender;
 use string_cache::{Atom, Namespace};
 use style::computed_values::content::ContentItem;
 use style::computed_values::{content, display, white_space};
+use selectors::matching::DeclarationBlock;
 use selectors::parser::{NamespaceConstraint, AttrSelector};
-use style::legacy::{IntegerAttribute, LengthAttribute, SimpleColorAttribute};
-use style::legacy::{UnsignedIntegerAttribute};
+use style::legacy::UnsignedIntegerAttribute;
 use style::node::{TElement, TElementAttributes, TNode};
-use style::properties::PropertyDeclarationBlock;
+use style::properties::{PropertyDeclaration, PropertyDeclarationBlock};
+use util::smallvec::VecLike;
 use url::Url;
 
 /// Allows some convenience methods on generic layout nodes.
@@ -169,22 +170,13 @@ pub trait TLayoutNode {
 
 /// A wrapper so that layout can access only the methods that it should have access to. Layout must
 /// only ever see these and must never see instances of `LayoutJS`.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct LayoutNode<'a> {
     /// The wrapped node.
     node: LayoutJS<Node>,
 
     /// Being chained to a PhantomData prevents `LayoutNode`s from escaping.
     pub chain: PhantomData<&'a ()>,
-}
-
-impl<'ln> Clone for LayoutNode<'ln> {
-    fn clone(&self) -> LayoutNode<'ln> {
-        LayoutNode {
-            node: self.node.clone(),
-            chain: self.chain,
-        }
-    }
 }
 
 impl<'a> PartialEq for LayoutNode<'a> {
@@ -197,7 +189,7 @@ impl<'a> PartialEq for LayoutNode<'a> {
 impl<'ln> TLayoutNode for LayoutNode<'ln> {
     unsafe fn new_with_this_lifetime(&self, node: &LayoutJS<Node>) -> LayoutNode<'ln> {
         LayoutNode {
-            node: node.transmute_copy(),
+            node: *node,
             chain: self.chain,
         }
     }
@@ -254,7 +246,7 @@ impl<'ln> LayoutNode<'ln> {
             s.push_str("  ");
         }
 
-        s.push_str(self.debug_str().as_slice());
+        s.push_str(&self.debug_str());
         println!("{}", s);
 
         for kid in self.children() {
@@ -519,7 +511,7 @@ impl<'a> Iterator for LayoutTreeIterator<'a> {
 }
 
 /// A wrapper around elements that ensures layout can only ever access safe properties.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct LayoutElement<'le> {
     element: &'le Element,
 }
@@ -544,19 +536,7 @@ impl<'le> TElement<'le> for LayoutElement<'le> {
         self.element.namespace()
     }
 
-    #[inline]
-    fn get_attr(self, namespace: &Namespace, name: &Atom) -> Option<&'le str> {
-        unsafe { self.element.get_attr_val_for_layout(namespace, name) }
-    }
-
-    #[inline]
-    fn get_attrs(self, name: &Atom) -> Vec<&'le str> {
-        unsafe {
-            self.element.get_attr_vals_for_layout(name)
-        }
-    }
-
-    fn get_link(self) -> Option<&'le str> {
+    fn is_link(self) -> bool {
         // FIXME: This is HTML only.
         let node: &Node = NodeCast::from_actual(self.element);
         match node.type_id_for_layout() {
@@ -565,11 +545,21 @@ impl<'le> TElement<'le> for LayoutElement<'le> {
             NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLAreaElement)) |
             NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLLinkElement)) => {
                 unsafe {
-                    self.element.get_attr_val_for_layout(&ns!(""), &atom!("href"))
+                    self.element.get_attr_val_for_layout(&ns!(""), &atom!("href")).is_some()
                 }
             }
-            _ => None,
+            _ => false,
         }
+    }
+
+    #[inline]
+    fn is_unvisited_link(self) -> bool {
+        self.is_link()
+    }
+
+    #[inline]
+    fn is_visited_link(self) -> bool {
+        false
     }
 
     #[inline]
@@ -649,25 +639,20 @@ impl<'le> TElement<'le> for LayoutElement<'le> {
     #[inline]
     fn has_nonzero_border(self) -> bool {
         unsafe {
-            match self.element.get_unsigned_integer_attribute_for_layout(
-                    UnsignedIntegerAttribute::Border) {
-                None | Some(0) => false,
+            match self.element.get_attr_for_layout(&ns!(""), &atom!("border")) {
+                None | Some(&AttrValue::UInt(_, 0)) => false,
                 _ => true,
             }
         }
     }
 }
 
-impl<'le> TElementAttributes for LayoutElement<'le> {
-    fn get_length_attribute(self, length_attribute: LengthAttribute) -> LengthOrPercentageOrAuto {
+impl<'le> TElementAttributes<'le> for LayoutElement<'le> {
+    fn synthesize_presentational_hints_for_legacy_attributes<V>(self, hints: &mut V)
+        where V: VecLike<DeclarationBlock<Vec<PropertyDeclaration>>>
+    {
         unsafe {
-            self.element.get_length_attribute_for_layout(length_attribute)
-        }
-    }
-
-    fn get_integer_attribute(self, integer_attribute: IntegerAttribute) -> Option<i32> {
-        unsafe {
-            self.element.get_integer_attribute_for_layout(integer_attribute)
+            self.element.synthesize_presentational_hints_for_legacy_attributes(hints);
         }
     }
 
@@ -677,9 +662,15 @@ impl<'le> TElementAttributes for LayoutElement<'le> {
         }
     }
 
-    fn get_simple_color_attribute(self, attribute: SimpleColorAttribute) -> Option<RGBA> {
+    #[inline]
+    fn get_attr(self, namespace: &Namespace, name: &Atom) -> Option<&'le str> {
+        unsafe { self.element.get_attr_val_for_layout(namespace, name) }
+    }
+
+    #[inline]
+    fn get_attrs(self, name: &Atom) -> Vec<&'le str> {
         unsafe {
-            self.element.get_simple_color_attribute_for_layout(attribute)
+            self.element.get_attr_vals_for_layout(name)
         }
     }
 }
@@ -728,10 +719,7 @@ impl<'ln> TLayoutNode for ThreadSafeLayoutNode<'ln> {
     /// Creates a new layout node with the same lifetime as this layout node.
     unsafe fn new_with_this_lifetime(&self, node: &LayoutJS<Node>) -> ThreadSafeLayoutNode<'ln> {
         ThreadSafeLayoutNode {
-            node: LayoutNode {
-                node: node.transmute_copy(),
-                chain: self.node.chain,
-            },
+            node: self.node.new_with_this_lifetime(node),
             pseudo: PseudoElementType::Normal,
         }
     }
@@ -1057,7 +1045,7 @@ impl<'ln> ThreadSafeLayoutNode<'ln> {
     /// `empty_cells` per CSS 2.1 § 17.6.1.1.
     pub fn is_content(&self) -> bool {
         match self.type_id() {
-            Some(NodeTypeId::Element(..)) | Some(NodeTypeId::Text(..)) => true,
+            Some(NodeTypeId::Element(..)) | Some(NodeTypeId::CharacterData(CharacterDataTypeId::Text(..))) => true,
             _ => false
         }
     }

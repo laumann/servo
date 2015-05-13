@@ -7,14 +7,14 @@ authors = ["The Servo Project Developers"]
 name = "net"
 path = "lib.rs"
 
-[dependencies.profile]
-path = "../profile"
-
 [dependencies.net_traits]
 path = "../net_traits"
 
 [dependencies.util]
 path = "../util"
+
+[dependencies.devtools_traits]
+path = "../devtools_traits"
 
 [dependencies.geom]
 git = "https://github.com/servo/rust-geom"
@@ -25,10 +25,11 @@ git = "https://github.com/servo/rust-png"
 [dependencies]
 url = "0.2.16"
 time = "0.1.17"
-openssl="0.5.1"
+openssl="0.6.1"
 rustc-serialize = "0.3"
 cookie="*"
 regex = "0.1.14"
 regex_macros = "0.1.8"
-hyper = "0.3"
+hyper = "0.4"
 flate2 = "0.2.0"
+uuid = "0.1.16"

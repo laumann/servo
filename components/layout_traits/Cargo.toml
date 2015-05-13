@@ -19,15 +19,14 @@ path = "../msg"
 [dependencies.net_traits]
 path = "../net_traits"
 
-[dependencies.profile]
-path = "../profile"
+[dependencies.profile_traits]
+path = "../profile_traits"
 
 [dependencies.util]
 path = "../util"
 
 [dependencies.session_types]
 git = "https://github.com/Munksgaard/session-types.git"
-branch = "for-servo"
 
 [dependencies]
 url = "0.2.16"

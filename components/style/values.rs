@@ -6,14 +6,13 @@
 
 pub use cssparser::RGBA;
 
-
 macro_rules! define_css_keyword_enum {
     ($name: ident: $( $css: expr => $variant: ident ),+,) => {
         define_css_keyword_enum!($name: $( $css => $variant ),+);
     };
     ($name: ident: $( $css: expr => $variant: ident ),+) => {
         #[allow(non_camel_case_types)]
-        #[derive(Clone, Eq, PartialEq, FromPrimitive, Copy, Hash)]
+        #[derive(Clone, Eq, PartialEq, Copy, Hash, RustcEncodable, Debug)]
         pub enum $name {
             $( $variant ),+
         }
@@ -27,17 +26,40 @@ macro_rules! define_css_keyword_enum {
             }
         }
 
-        impl ::std::fmt::Debug for $name {
-            #[inline]
-            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                use cssparser::ToCss;
-                self.fmt_to_css(f)
+        impl ::cssparser::ToCss for $name {
+            fn to_css<W>(&self, dest: &mut W) -> ::std::fmt::Result
+            where W: ::std::fmt::Write {
+                match self {
+                    $( &$name::$variant => dest.write_str($css) ),+
+                }
+            }
+        }
+    }
+}
+
+macro_rules! define_numbered_css_keyword_enum {
+    ($name: ident: $( $css: expr => $variant: ident = $value: expr ),+,) => {
+        define_numbered_css_keyword_enum!($name: $( $css => $variant = $value ),+);
+    };
+    ($name: ident: $( $css: expr => $variant: ident = $value: expr ),+) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Copy, RustcEncodable, Debug)]
+        pub enum $name {
+            $( $variant = $value ),+
+        }
+
+        impl $name {
+            pub fn parse(input: &mut ::cssparser::Parser) -> Result<$name, ()> {
+                match_ignore_ascii_case! { try!(input.expect_ident()),
+                    $( $css => Ok($name::$variant) ),+
+                    _ => Err(())
+                }
             }
         }
 
         impl ::cssparser::ToCss for $name {
-            fn to_css<W>(&self, dest: &mut W) -> ::text_writer::Result
-            where W: ::text_writer::TextWriter {
+            fn to_css<W>(&self, dest: &mut W) -> ::std::fmt::Result
+            where W: ::std::fmt::Write {
                 match self {
                     $( &$name::$variant => dest.write_str($css) ),+
                 }
@@ -47,26 +69,40 @@ macro_rules! define_css_keyword_enum {
 }
 
 
-pub type CSSFloat = f64;
+pub type CSSFloat = f32;
 
 
 pub mod specified {
     use std::ascii::AsciiExt;
     use std::cmp;
-    use std::f64::consts::PI;
+    use std::f32::consts::PI;
     use std::fmt;
-    use std::fmt::{Formatter, Debug};
-    use std::num::{NumCast, ToPrimitive};
+    use std::fmt::Write;
     use std::ops::{Add, Mul};
     use url::Url;
     use cssparser::{self, Token, Parser, ToCss, CssStringWriter};
     use geom::size::Size2D;
     use parser::ParserContext;
-    use text_writer::{self, TextWriter};
     use util::geometry::Au;
     use super::CSSFloat;
 
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AllowedNumericType {
+        All,
+        NonNegative
+    }
+
+    impl AllowedNumericType {
+        #[inline]
+        pub fn is_ok(&self, value: f32) -> bool {
+            match self {
+                &AllowedNumericType::All => true,
+                &AllowedNumericType::NonNegative => value >= 0.,
+            }
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
     pub struct CSSColor {
         pub parsed: cssparser::Color,
         pub authored: Option<String>,
@@ -86,12 +122,8 @@ pub mod specified {
         }
     }
 
-    impl fmt::Debug for CSSColor {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for CSSColor {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self.authored {
                 Some(ref s) => dest.write_str(s),
                 None => self.parsed.to_css(dest),
@@ -99,17 +131,14 @@ pub mod specified {
         }
     }
 
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, PartialEq, Debug)]
     pub struct CSSRGBA {
         pub parsed: cssparser::RGBA,
         pub authored: Option<String>,
     }
-    impl fmt::Debug for CSSRGBA {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
 
     impl ToCss for CSSRGBA {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self.authored {
                 Some(ref s) => dest.write_str(s),
                 None => self.parsed.to_css(dest),
@@ -117,19 +146,15 @@ pub mod specified {
         }
     }
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum FontRelativeLength {
         Em(CSSFloat),
         Ex(CSSFloat),
         Rem(CSSFloat)
     }
 
-    impl fmt::Debug for FontRelativeLength {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for FontRelativeLength {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &FontRelativeLength::Em(length) => write!(dest, "{}em", length),
                 &FontRelativeLength::Ex(length) => write!(dest, "{}ex", length),
@@ -155,7 +180,7 @@ pub mod specified {
         }
     }
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum ViewportPercentageLength {
         Vw(CSSFloat),
         Vh(CSSFloat),
@@ -163,12 +188,8 @@ pub mod specified {
         Vmax(CSSFloat)
     }
 
-    impl fmt::Debug for ViewportPercentageLength {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for ViewportPercentageLength {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &ViewportPercentageLength::Vw(length) => write!(dest, "{}vw", length),
                 &ViewportPercentageLength::Vh(length) => write!(dest, "{}vh", length),
@@ -182,7 +203,7 @@ pub mod specified {
         pub fn to_computed_value(&self, viewport_size: Size2D<Au>) -> Au {
             macro_rules! to_unit {
                 ($viewport_dimension:expr) => {
-                    $viewport_dimension.to_f64().unwrap() / 100.0
+                    $viewport_dimension.to_f32_px() / 100.0
                 }
             }
 
@@ -196,11 +217,11 @@ pub mod specified {
                 &ViewportPercentageLength::Vmax(length) =>
                     length * to_unit!(cmp::max(viewport_size.width, viewport_size.height)),
             };
-            NumCast::from(value).unwrap()
+            Au::from_f32_px(value)
         }
     }
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub struct CharacterWidth(pub i32);
 
     impl CharacterWidth {
@@ -215,7 +236,7 @@ pub mod specified {
         }
     }
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum Length {
         Absolute(Au),  // application units
         FontRelative(FontRelativeLength),
@@ -228,14 +249,10 @@ pub mod specified {
         ServoCharacterWidth(CharacterWidth),
     }
 
-    impl fmt::Debug for Length {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for Length {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
-                &Length::Absolute(length) => write!(dest, "{}px", length.to_subpx()),
+                &Length::Absolute(length) => write!(dest, "{}px", length.to_f32_px()),
                 &Length::FontRelative(length) => length.to_css(dest),
                 &Length::ViewportPercentage(length) => length.to_css(dest),
                 &Length::ServoCharacterWidth(_)
@@ -250,7 +267,7 @@ pub mod specified {
         #[inline]
         fn mul(self, scalar: CSSFloat) -> Length {
             match self {
-                Length::Absolute(Au(v)) => Length::Absolute(Au(((v as f64) * scalar) as i32)),
+                Length::Absolute(Au(v)) => Length::Absolute(Au(((v as f32) * scalar) as i32)),
                 Length::FontRelative(v) => Length::FontRelative(v * scalar),
                 Length::ViewportPercentage(v) => Length::ViewportPercentage(v * scalar),
                 Length::ServoCharacterWidth(_) => panic!("Can't multiply ServoCharacterWidth!"),
@@ -293,21 +310,21 @@ pub mod specified {
     const AU_PER_PC: CSSFloat = AU_PER_PT * 12.;
     impl Length {
         #[inline]
-        fn parse_internal(input: &mut Parser, negative_ok: bool) -> Result<Length, ()> {
+        fn parse_internal(input: &mut Parser, context: &AllowedNumericType) -> Result<Length, ()> {
             match try!(input.next()) {
-                Token::Dimension(ref value, ref unit) if negative_ok || value.value >= 0. => {
-                    Length::parse_dimension(value.value, unit)
-                }
-                Token::Number(ref value) if value.value == 0. => Ok(Length::Absolute(Au(0))),
+                Token::Dimension(ref value, ref unit) if context.is_ok(value.value) =>
+                    Length::parse_dimension(value.value, unit),
+                Token::Number(ref value) if value.value == 0. =>
+                    Ok(Length::Absolute(Au(0))),
                 _ => Err(())
             }
         }
         #[allow(dead_code)]
         pub fn parse(input: &mut Parser) -> Result<Length, ()> {
-            Length::parse_internal(input, /* negative_ok = */ true)
+            Length::parse_internal(input, &AllowedNumericType::All)
         }
         pub fn parse_non_negative(input: &mut Parser) -> Result<Length, ()> {
-            Length::parse_internal(input, /* negative_ok = */ false)
+            Length::parse_internal(input, &AllowedNumericType::NonNegative)
         }
         pub fn parse_dimension(value: CSSFloat, unit: &str) -> Result<Length, ()> {
             match_ignore_ascii_case! { unit,
@@ -336,18 +353,14 @@ pub mod specified {
     }
 
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum LengthOrPercentage {
         Length(Length),
         Percentage(CSSFloat),  // [0 .. 100%] maps to [0.0 .. 1.0]
     }
 
-    impl fmt::Debug for LengthOrPercentage {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for LengthOrPercentage {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &LengthOrPercentage::Length(length) => length.to_css(dest),
                 &LengthOrPercentage::Percentage(percentage)
@@ -356,46 +369,39 @@ pub mod specified {
         }
     }
     impl LengthOrPercentage {
-        fn parse_internal(input: &mut Parser, negative_ok: bool)
-                          -> Result<LengthOrPercentage, ()> {
+        fn parse_internal(input: &mut Parser, context: &AllowedNumericType)
+                          -> Result<LengthOrPercentage, ()>
+        {
             match try!(input.next()) {
-                Token::Dimension(ref value, ref unit) if negative_ok || value.value >= 0. => {
-                    Length::parse_dimension(value.value, unit)
-                    .map(LengthOrPercentage::Length)
-                }
-                Token::Percentage(ref value) if negative_ok || value.unit_value >= 0. => {
-                    Ok(LengthOrPercentage::Percentage(value.unit_value))
-                }
-                Token::Number(ref value) if value.value == 0. => {
-                    Ok(LengthOrPercentage::Length(Length::Absolute(Au(0))))
-                }
+                Token::Dimension(ref value, ref unit) if context.is_ok(value.value) =>
+                    Length::parse_dimension(value.value, unit).map(LengthOrPercentage::Length),
+                Token::Percentage(ref value) if context.is_ok(value.unit_value) =>
+                    Ok(LengthOrPercentage::Percentage(value.unit_value)),
+                Token::Number(ref value) if value.value == 0. =>
+                    Ok(LengthOrPercentage::Length(Length::Absolute(Au(0)))),
                 _ => Err(())
             }
         }
         #[allow(dead_code)]
         #[inline]
         pub fn parse(input: &mut Parser) -> Result<LengthOrPercentage, ()> {
-            LengthOrPercentage::parse_internal(input, /* negative_ok = */ true)
+            LengthOrPercentage::parse_internal(input, &AllowedNumericType::All)
         }
         #[inline]
         pub fn parse_non_negative(input: &mut Parser) -> Result<LengthOrPercentage, ()> {
-            LengthOrPercentage::parse_internal(input, /* negative_ok = */ false)
+            LengthOrPercentage::parse_internal(input, &AllowedNumericType::NonNegative)
         }
     }
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum LengthOrPercentageOrAuto {
         Length(Length),
         Percentage(CSSFloat),  // [0 .. 100%] maps to [0.0 .. 1.0]
         Auto,
     }
 
-    impl fmt::Debug for LengthOrPercentageOrAuto {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for LengthOrPercentageOrAuto {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &LengthOrPercentageOrAuto::Length(length) => length.to_css(dest),
                 &LengthOrPercentageOrAuto::Percentage(percentage)
@@ -404,85 +410,74 @@ pub mod specified {
             }
         }
     }
+
     impl LengthOrPercentageOrAuto {
-        fn parse_internal(input: &mut Parser, negative_ok: bool)
-                     -> Result<LengthOrPercentageOrAuto, ()> {
+        fn parse_internal(input: &mut Parser, context: &AllowedNumericType)
+                          -> Result<LengthOrPercentageOrAuto, ()>
+        {
             match try!(input.next()) {
-                Token::Dimension(ref value, ref unit) if negative_ok || value.value >= 0. => {
-                    Length::parse_dimension(value.value, unit)
-                    .map(LengthOrPercentageOrAuto::Length)
-                }
-                Token::Percentage(ref value) if negative_ok || value.unit_value >= 0. => {
-                    Ok(LengthOrPercentageOrAuto::Percentage(value.unit_value))
-                }
-                Token::Number(ref value) if value.value == 0. => {
-                    Ok(LengthOrPercentageOrAuto::Length(Length::Absolute(Au(0))))
-                }
-                Token::Ident(ref value) if value.eq_ignore_ascii_case("auto") => {
-                    Ok(LengthOrPercentageOrAuto::Auto)
-                }
+                Token::Dimension(ref value, ref unit) if context.is_ok(value.value) =>
+                    Length::parse_dimension(value.value, unit).map(LengthOrPercentageOrAuto::Length),
+                Token::Percentage(ref value) if context.is_ok(value.unit_value) =>
+                    Ok(LengthOrPercentageOrAuto::Percentage(value.unit_value)),
+                Token::Number(ref value) if value.value == 0. =>
+                    Ok(LengthOrPercentageOrAuto::Length(Length::Absolute(Au(0)))),
+                Token::Ident(ref value) if value.eq_ignore_ascii_case("auto") =>
+                    Ok(LengthOrPercentageOrAuto::Auto),
                 _ => Err(())
             }
         }
         #[inline]
         pub fn parse(input: &mut Parser) -> Result<LengthOrPercentageOrAuto, ()> {
-            LengthOrPercentageOrAuto::parse_internal(input, /* negative_ok = */ true)
+            LengthOrPercentageOrAuto::parse_internal(input, &AllowedNumericType::All)
         }
         #[inline]
         pub fn parse_non_negative(input: &mut Parser) -> Result<LengthOrPercentageOrAuto, ()> {
-            LengthOrPercentageOrAuto::parse_internal(input, /* negative_ok = */ false)
+            LengthOrPercentageOrAuto::parse_internal(input, &AllowedNumericType::NonNegative)
         }
     }
 
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum LengthOrPercentageOrNone {
         Length(Length),
         Percentage(CSSFloat),  // [0 .. 100%] maps to [0.0 .. 1.0]
         None,
     }
 
-    impl fmt::Debug for LengthOrPercentageOrNone {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for LengthOrPercentageOrNone {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &LengthOrPercentageOrNone::Length(length) => length.to_css(dest),
-                &LengthOrPercentageOrNone::Percentage(percentage)
-                => write!(dest, "{}%", percentage * 100.),
+                &LengthOrPercentageOrNone::Percentage(percentage) =>
+                    write!(dest, "{}%", percentage * 100.),
                 &LengthOrPercentageOrNone::None => dest.write_str("none"),
             }
         }
     }
     impl LengthOrPercentageOrNone {
-        fn parse_internal(input: &mut Parser, negative_ok: bool)
-                     -> Result<LengthOrPercentageOrNone, ()> {
+        fn parse_internal(input: &mut Parser, context: &AllowedNumericType)
+                          -> Result<LengthOrPercentageOrNone, ()>
+        {
             match try!(input.next()) {
-                Token::Dimension(ref value, ref unit) if negative_ok || value.value >= 0. => {
-                    Length::parse_dimension(value.value, unit)
-                    .map(LengthOrPercentageOrNone::Length)
-                }
-                Token::Percentage(ref value) if negative_ok || value.unit_value >= 0. => {
-                    Ok(LengthOrPercentageOrNone::Percentage(value.unit_value))
-                }
-                Token::Number(ref value) if value.value == 0. => {
-                    Ok(LengthOrPercentageOrNone::Length(Length::Absolute(Au(0))))
-                }
-                Token::Ident(ref value) if value.eq_ignore_ascii_case("none") => {
-                    Ok(LengthOrPercentageOrNone::None)
-                }
+                Token::Dimension(ref value, ref unit) if context.is_ok(value.value) =>
+                    Length::parse_dimension(value.value, unit).map(LengthOrPercentageOrNone::Length),
+                Token::Percentage(ref value) if context.is_ok(value.unit_value) =>
+                    Ok(LengthOrPercentageOrNone::Percentage(value.unit_value)),
+                Token::Number(ref value) if value.value == 0. =>
+                    Ok(LengthOrPercentageOrNone::Length(Length::Absolute(Au(0)))),
+                Token::Ident(ref value) if value.eq_ignore_ascii_case("none") =>
+                    Ok(LengthOrPercentageOrNone::None),
                 _ => Err(())
             }
         }
         #[allow(dead_code)]
         #[inline]
         pub fn parse(input: &mut Parser) -> Result<LengthOrPercentageOrNone, ()> {
-            LengthOrPercentageOrNone::parse_internal(input, /* negative_ok = */ true)
+            LengthOrPercentageOrNone::parse_internal(input, &AllowedNumericType::All)
         }
         #[inline]
         pub fn parse_non_negative(input: &mut Parser) -> Result<LengthOrPercentageOrNone, ()> {
-            LengthOrPercentageOrNone::parse_internal(input, /* negative_ok = */ false)
+            LengthOrPercentageOrNone::parse_internal(input, &AllowedNumericType::NonNegative)
         }
     }
 
@@ -542,7 +537,7 @@ pub mod specified {
 
         fn add(self, other: LengthAndPercentage) -> LengthAndPercentage {
             let mut new_lengths = self.lengths.clone();
-            new_lengths.push_all(other.lengths.as_slice());
+            new_lengths.push_all(&other.lengths);
             LengthAndPercentage {
                 lengths: new_lengths,
                 percentage: self.percentage + other.percentage,
@@ -612,22 +607,18 @@ pub mod specified {
         }
     }
 
-    #[derive(Clone, PartialEq, PartialOrd, Copy)]
+    #[derive(Clone, PartialEq, PartialOrd, Copy, Debug)]
     pub struct Angle(pub CSSFloat);
 
-    impl fmt::Debug for Angle {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for Angle {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             let Angle(value) = *self;
             write!(dest, "{}rad", value)
         }
     }
 
     impl Angle {
-        pub fn radians(self) -> f64 {
+        pub fn radians(self) -> f32 {
             let Angle(radians) = self;
             radians
         }
@@ -657,18 +648,14 @@ pub mod specified {
     }
 
     /// Specified values for an image according to CSS-IMAGES.
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, PartialEq, Debug)]
     pub enum Image {
         Url(Url),
         LinearGradient(LinearGradient),
     }
 
-    impl fmt::Debug for Image {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for Image {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &Image::Url(ref url) => {
                     try!(dest.write_str("url(\""));
@@ -702,7 +689,7 @@ pub mod specified {
     }
 
     /// Specified values for a CSS linear gradient.
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, PartialEq, Debug)]
     pub struct LinearGradient {
         /// The angle or corner of the gradient.
         pub angle_or_corner: AngleOrCorner,
@@ -711,42 +698,34 @@ pub mod specified {
         pub stops: Vec<ColorStop>,
     }
 
-    impl fmt::Debug for LinearGradient {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for LinearGradient {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             try!(dest.write_str("linear-gradient("));
             try!(self.angle_or_corner.to_css(dest));
             for stop in self.stops.iter() {
                 try!(dest.write_str(", "));
                 try!(stop.to_css(dest));
             }
-            try!(dest.write_char(')'));
+            try!(dest.write_str(")"));
             Ok(())
         }
     }
 
     /// Specified values for an angle or a corner in a linear gradient.
-    #[derive(Clone, PartialEq, Copy)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
     pub enum AngleOrCorner {
         Angle(Angle),
         Corner(HorizontalDirection, VerticalDirection),
     }
 
-    impl fmt::Debug for AngleOrCorner {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for AngleOrCorner {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self {
                 &AngleOrCorner::Angle(angle) => angle.to_css(dest),
                 &AngleOrCorner::Corner(horizontal, vertical) => {
                     try!(dest.write_str("to "));
                     try!(horizontal.to_css(dest));
-                    try!(dest.write_char(' '));
+                    try!(dest.write_str(" "));
                     try!(vertical.to_css(dest));
                     Ok(())
                 }
@@ -755,7 +734,7 @@ pub mod specified {
     }
 
     /// Specified values for one color stop in a linear gradient.
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone, PartialEq, Debug)]
     pub struct ColorStop {
         /// The color of this stop.
         pub color: CSSColor,
@@ -765,15 +744,11 @@ pub mod specified {
         pub position: Option<LengthOrPercentage>,
     }
 
-    impl fmt::Debug for ColorStop {
-        #[inline] fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.fmt_to_css(f) }
-    }
-
     impl ToCss for ColorStop {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             try!(self.color.to_css(dest));
             if let Some(position) = self.position {
-                try!(dest.write_char(' '));
+                try!(dest.write_str(" "));
                 try!(position.to_css(dest));
             }
             Ok(())
@@ -850,17 +825,19 @@ pub mod specified {
         })
     }
 
-    define_css_keyword_enum! { BorderStyle:
-        "none" => none,
-        "solid" => solid,
-        "double" => double,
-        "dotted" => dotted,
-        "dashed" => dashed,
-        "hidden" => hidden,
-        "groove" => groove,
-        "ridge" => ridge,
-        "inset" => inset,
-        "outset" => outset,
+    // The integer values here correspond to the border conflict resolution rules in CSS 2.1 §
+    // 17.6.2.1. Higher values override lower values.
+    define_numbered_css_keyword_enum! { BorderStyle:
+        "none" => none = -1,
+        "solid" => solid = 6,
+        "double" => double = 7,
+        "dotted" => dotted = 4,
+        "dashed" => dashed = 5,
+        "hidden" => hidden = -2,
+        "groove" => groove = 1,
+        "ridge" => ridge = 3,
+        "inset" => inset = 0,
+        "outset" => outset = 2,
     }
 
     /// A time in seconds according to CSS-VALUES § 6.2.
@@ -869,7 +846,7 @@ pub mod specified {
 
     impl Time {
         /// Returns the time in fractional seconds.
-        pub fn seconds(self) -> f64 {
+        pub fn seconds(self) -> f32 {
             let Time(seconds) = self;
             seconds
         }
@@ -888,7 +865,7 @@ pub mod specified {
         pub fn parse(input: &mut Parser) -> Result<Time,()> {
             match input.next() {
                 Ok(Token::Dimension(ref value, ref unit)) => {
-                    Time::parse_dimension(value.value, unit.as_slice())
+                    Time::parse_dimension(value.value, &unit)
                 }
                 _ => Err(()),
             }
@@ -905,8 +882,8 @@ pub mod specified {
     }
 
     impl ToCss for Time {
-        fn to_css<W>(&self, dest: &mut W) -> text_writer::Result where W: TextWriter {
-            dest.write_str(format!("{}ms", self.0).as_slice())
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            write!(dest, "{}ms", self.0)
         }
     }
 }
@@ -919,7 +896,6 @@ pub mod computed {
     use geom::size::Size2D;
     use properties::longhands;
     use std::fmt;
-    use std::marker::MarkerTrait;
     use std::ops::{Add, Mul};
     use url::Url;
     use util::geometry::Au;
@@ -955,7 +931,7 @@ pub mod computed {
         fn to_computed_value(&self, _context: &Context) -> Self::ComputedValue;
     }
 
-    pub trait ComputedValueAsSpecified: MarkerTrait {}
+    pub trait ComputedValueAsSpecified {}
 
     impl<T> ToComputedValue for T where T: ComputedValueAsSpecified + Clone {
         type ComputedValue = T;
@@ -1144,7 +1120,7 @@ pub mod computed {
 
         fn mul(self, scalar: CSSFloat) -> LengthAndPercentage {
             LengthAndPercentage {
-                length: Au::from_frac_px(self.length.to_subpx() * scalar),
+                length: Au::from_f32_px(self.length.to_f32_px() * scalar),
                 percentage: self.percentage * scalar,
             }
         }

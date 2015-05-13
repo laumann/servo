@@ -45,7 +45,7 @@ use hyper::header::Headers;
 use hyper::method::Method;
 use js::jsapi::{JSObject, JSTracer, JS_CallTracer, JSGCTraceKind};
 use js::jsval::JSVal;
-use js::rust::{Cx, Runtime};
+use js::rust::Runtime;
 use layout_interface::{LayoutRPC, LayoutChan};
 use libc;
 use msg::constellation_msg::{PipelineId, SubpageId, WindowSizeData, WorkerId};
@@ -56,7 +56,7 @@ use script_traits::UntrustedNodeAddress;
 use msg::compositor_msg::ScriptListener;
 use msg::constellation_msg::ConstellationChan;
 use net_traits::image::base::Image;
-use util::smallvec::{SmallVec1, SmallVec};
+use util::smallvec::SmallVec1;
 use util::str::{LengthOrPercentageOrAuto};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -64,7 +64,6 @@ use std::collections::hash_state::HashState;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::intrinsics::return_address;
-use std::old_io::timer::Timer;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -99,7 +98,7 @@ pub fn trace_jsval(tracer: *mut JSTracer, description: &str, val: JSVal) {
     unsafe {
         let name = CString::new(description).unwrap();
         (*tracer).debugPrinter = None;
-        (*tracer).debugPrintIndex = -1;
+        (*tracer).debugPrintIndex = !0;
         (*tracer).debugPrintArg = name.as_ptr() as *const libc::c_void;
         debug!("tracing value {}", description);
         JS_CallTracer(tracer, val.to_gcthing(), val.trace_kind());
@@ -117,7 +116,7 @@ pub fn trace_object(tracer: *mut JSTracer, description: &str, obj: *mut JSObject
     unsafe {
         let name = CString::new(description).unwrap();
         (*tracer).debugPrinter = None;
-        (*tracer).debugPrintIndex = -1;
+        (*tracer).debugPrintIndex = !0;
         (*tracer).debugPrintArg = name.as_ptr() as *const libc::c_void;
         debug!("tracing {}", description);
         JS_CallTracer(tracer, obj as *mut libc::c_void, JSGCTraceKind::JSTRACE_OBJECT);
@@ -252,7 +251,7 @@ no_jsmanaged_fields!(Receiver<T>);
 no_jsmanaged_fields!(Rect<T>);
 no_jsmanaged_fields!(Arc<T>);
 no_jsmanaged_fields!(Image, ImageCacheChan, ImageCacheTask, ScriptControlChan);
-no_jsmanaged_fields!(Atom, Namespace, Timer);
+no_jsmanaged_fields!(Atom, Namespace);
 no_jsmanaged_fields!(Trusted<T>);
 no_jsmanaged_fields!(PropertyDeclarationBlock);
 no_jsmanaged_fields!(HashSet<T>);
@@ -261,7 +260,6 @@ no_jsmanaged_fields!(HashSet<T>);
 no_jsmanaged_fields!(SubpageId, WindowSizeData, PipelineId);
 no_jsmanaged_fields!(WorkerId);
 no_jsmanaged_fields!(QuirksMode);
-no_jsmanaged_fields!(Cx);
 no_jsmanaged_fields!(Runtime);
 no_jsmanaged_fields!(Headers, Method);
 no_jsmanaged_fields!(ConstellationChan);
@@ -276,6 +274,13 @@ no_jsmanaged_fields!(CanvasGradientStop, LinearGradientStyle, RadialGradientStyl
 no_jsmanaged_fields!(LineCapStyle, LineJoinStyle, CompositionOrBlending);
 
 impl JSTraceable for Box<ScriptChan+Send> {
+    #[inline]
+    fn trace(&self, _trc: *mut JSTracer) {
+        // Do nothing
+    }
+}
+
+impl JSTraceable for Box<Fn(f64, )> {
     #[inline]
     fn trace(&self, _trc: *mut JSTracer) {
         // Do nothing
@@ -318,16 +323,20 @@ impl JSTraceable for () {
 
 /// Holds a set of vectors that need to be rooted
 pub struct RootedCollectionSet {
-    set: Vec<HashSet<*const RootedVec<()>>>
+    set: Vec<HashSet<*const RootedVec<Void>>>
 }
 
 /// TLV Holds a set of vectors that need to be rooted
 thread_local!(pub static ROOTED_COLLECTIONS: Rc<RefCell<RootedCollectionSet>> =
               Rc::new(RefCell::new(RootedCollectionSet::new())));
 
-enum CollectionType {
+/// Type of `RootedVec`
+pub enum CollectionType {
+    /// DOM objects
     DOMObjects,
+    /// `JSVal`s
     JSVals,
+    /// `*mut JSObject`s
     JSObjects,
 }
 
@@ -356,10 +365,12 @@ impl RootedCollectionSet {
     }
 
     unsafe fn trace(&self, tracer: *mut JSTracer) {
-        fn trace_collection_type<T: JSTraceable>(tracer: *mut JSTracer,
-                                                 collections: &HashSet<*const RootedVec<()>>) {
+        fn trace_collection_type<T>(tracer: *mut JSTracer,
+                                    collections: &HashSet<*const RootedVec<Void>>)
+            where T: JSTraceable + VecRootableType
+        {
             for collection in collections {
-                let collection: *const RootedVec<()> = *collection;
+                let collection: *const RootedVec<Void> = *collection;
                 let collection = collection as *const RootedVec<T>;
                 unsafe {
                     let _ = (*collection).trace(tracer);
@@ -367,10 +378,10 @@ impl RootedCollectionSet {
             }
         }
 
-        let dom_collections = &self.set[CollectionType::DOMObjects as usize] as *const _ as *const HashSet<*const RootedVec<*const Reflector>>;
+        let dom_collections = &self.set[CollectionType::DOMObjects as usize] as *const _ as *const HashSet<*const RootedVec<JS<Void>>>;
         for dom_collection in (*dom_collections).iter() {
             for reflector in (**dom_collection).iter() {
-                trace_reflector(tracer, "", &**reflector);
+                trace_reflector(tracer, "", reflector.reflector());
             }
         }
 
@@ -381,7 +392,7 @@ impl RootedCollectionSet {
 
 
 /// Trait implemented by all types that can be used with RootedVec
-trait VecRootableType {
+pub trait VecRootableType {
     /// Return the type tag used to determine how to trace RootedVec
     fn tag(_a: Option<Self>) -> CollectionType;
 }
@@ -398,11 +409,21 @@ impl VecRootableType for *mut JSObject {
     fn tag(_a: Option<*mut JSObject>) -> CollectionType { CollectionType::JSObjects }
 }
 
+enum Void {}
+
+impl VecRootableType for Void {
+    fn tag(_a: Option<Void>) -> CollectionType { unreachable!() }
+}
+
+impl Reflectable for Void {
+    fn reflector<'a>(&'a self) -> &'a Reflector { unreachable!() }
+}
+
 /// A vector of items that are rooted for the lifetime
 /// of this struct
 #[allow(unrooted_must_root)]
-#[jstraceable]
-pub struct RootedVec<T> {
+#[no_move]
+pub struct RootedVec<T: VecRootableType> {
     v: Vec<T>
 }
 
@@ -428,21 +449,20 @@ impl<T: VecRootableType> RootedVec<T> {
     }
 }
 
-#[unsafe_destructor]
 impl<T: VecRootableType> Drop for RootedVec<T> {
     fn drop(&mut self) {
         RootedCollectionSet::remove(self);
     }
 }
 
-impl<T> Deref for RootedVec<T> {
+impl<T: VecRootableType> Deref for RootedVec<T> {
     type Target = Vec<T>;
     fn deref(&self) -> &Vec<T> {
         &self.v
     }
 }
 
-impl<T> DerefMut for RootedVec<T> {
+impl<T: VecRootableType> DerefMut for RootedVec<T> {
     fn deref_mut(&mut self) -> &mut Vec<T> {
         &mut self.v
     }

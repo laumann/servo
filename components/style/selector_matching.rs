@@ -8,15 +8,17 @@ use selectors::bloom::BloomFilter;
 use selectors::matching::{SelectorMap, Rule};
 use selectors::matching::DeclarationBlock as GenericDeclarationBlock;
 use selectors::parser::PseudoElement;
-use selectors::smallvec::VecLike;
 use selectors::tree::TNode;
+use std::process;
 use util::resource_files::read_resource_file;
+use util::smallvec::VecLike;
 
 use legacy::PresentationalHintSynthesis;
 use media_queries::Device;
 use node::TElementAttributes;
 use properties::{PropertyDeclaration, PropertyDeclarationBlock};
 use stylesheets::{Stylesheet, CSSRuleIteratorExt, Origin};
+use viewport::{ViewportConstraints, ViewportRuleCascade};
 
 
 pub type DeclarationBlock = GenericDeclarationBlock<Vec<PropertyDeclaration>>;
@@ -58,15 +60,31 @@ impl Stylist {
         // FIXME: presentational-hints.css should be at author origin with zero specificity.
         //        (Does it make a difference?)
         for &filename in ["user-agent.css", "servo.css", "presentational-hints.css"].iter() {
-            let ua_stylesheet = Stylesheet::from_bytes(
-                &read_resource_file(&[filename]).unwrap(),
-                Url::parse(&format!("chrome:///{:?}", filename)).unwrap(),
-                None,
-                None,
-                Origin::UserAgent);
-            stylist.add_stylesheet(ua_stylesheet);
+            match read_resource_file(&[filename]) {
+                Ok(res) => {
+                    let ua_stylesheet = Stylesheet::from_bytes(
+                        &res,
+                        Url::parse(&format!("chrome:///{:?}", filename)).unwrap(),
+                        None,
+                        None,
+                        Origin::UserAgent);
+                    stylist.add_stylesheet(ua_stylesheet);
+                }
+                Err(..) => {
+                    error!("Stylist::new() failed at loading {}!", filename);
+                    process::exit(1);
+                }
+            }
         }
         stylist
+    }
+
+    pub fn constrain_viewport(&self) -> Option<ViewportConstraints> {
+        let cascaded_rule = self.stylesheets.iter()
+            .flat_map(|s| s.effective_rules(&self.device).viewport())
+            .cascade();
+
+        ViewportConstraints::maybe_new(self.device.viewport_size, &cascaded_rule)
     }
 
     pub fn update(&mut self) -> bool {
@@ -145,12 +163,20 @@ impl Stylist {
     }
 
     pub fn add_quirks_mode_stylesheet(&mut self) {
-        self.add_stylesheet(Stylesheet::from_bytes(
-            &read_resource_file(&["quirks-mode.css"]).unwrap(),
-            Url::parse("chrome:///quirks-mode.css").unwrap(),
-            None,
-            None,
-            Origin::UserAgent))
+        match read_resource_file(&["quirks-mode.css"]) {
+            Ok(res) => {
+            self.add_stylesheet(Stylesheet::from_bytes(
+                &res,
+                Url::parse("chrome:///quirks-mode.css").unwrap(),
+                None,
+                None,
+                Origin::UserAgent));
+            }
+            Err(..) => {
+                error!("Stylist::add_quirks_mode_stylesheet() failed at loading 'quirks-mode.css'!");
+                process::exit(1);
+            }
+        }
     }
 
     pub fn add_stylesheet(&mut self, stylesheet: Stylesheet) {
@@ -173,7 +199,7 @@ impl Stylist {
                                         applicable_declarations: &mut V)
                                         -> bool
                                         where N: TNode<'a>,
-                                              N::Element: TElementAttributes,
+                                              N::Element: TElementAttributes<'a>,
                                               V: VecLike<DeclarationBlock> {
         assert!(!self.is_dirty);
         assert!(element.is_element());
@@ -213,7 +239,7 @@ impl Stylist {
         // Step 4: Normal style attributes.
         style_attribute.map(|sa| {
             shareable = false;
-            applicable_declarations.vec_push(
+            applicable_declarations.push(
                 GenericDeclarationBlock::from_declarations(sa.normal.clone()))
         });
 
@@ -226,7 +252,7 @@ impl Stylist {
         // Step 6: `!important` style attributes.
         style_attribute.map(|sa| {
             shareable = false;
-            applicable_declarations.vec_push(
+            applicable_declarations.push(
                 GenericDeclarationBlock::from_declarations(sa.important.clone()))
         });
 
@@ -241,6 +267,10 @@ impl Stylist {
                                                         &mut shareable);
 
         shareable
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.is_dirty
     }
 }
 

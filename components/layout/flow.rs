@@ -44,19 +44,17 @@ use table_colgroup::TableColGroupFlow;
 use table_row::TableRowFlow;
 use table_rowgroup::TableRowGroupFlow;
 use table_wrapper::TableWrapperFlow;
+use multicol::MulticolFlow;
 use wrapper::ThreadSafeLayoutNode;
 
 use geom::{Point2D, Rect, Size2D};
 use gfx::display_list::ClippingRegion;
-use rustc_serialize::{Encoder, Encodable};
-use msg::constellation_msg::ConstellationChan;
 use msg::compositor_msg::LayerId;
-use util::geometry::{Au, ZERO_RECT};
-use util::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
-use std::mem;
+use msg::constellation_msg::ConstellationChan;
+use rustc_serialize::{Encoder, Encodable};
 use std::fmt;
 use std::iter::Zip;
-use std::num::FromPrimitive;
+use std::mem;
 use std::raw;
 use std::slice::IterMut;
 use std::sync::Arc;
@@ -64,6 +62,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use style::computed_values::{clear, empty_cells, float, position, text_align};
 use style::properties::ComputedValues;
 use style::values::computed::LengthOrPercentageOrAuto;
+use util::geometry::{Au, ZERO_RECT};
+use util::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
 
 /// Virtual methods that make up a float context.
 ///
@@ -158,6 +158,11 @@ pub trait Flow: fmt::Debug + Sync {
         panic!("called as_table_cell() on a non-tablecell flow")
     }
 
+    /// If this is a multicol flow, returns the underlying object. Fails otherwise.
+    fn as_multicol<'a>(&'a mut self) -> &'a mut MulticolFlow {
+        panic!("called as_multicol() on a non-multicol flow")
+    }
+
     /// If this is a table cell flow, returns the underlying object, borrowed immutably. Fails
     /// otherwise.
     fn as_immutable_table_cell<'a>(&'a self) -> &'a TableCellFlow {
@@ -216,9 +221,53 @@ pub trait Flow: fmt::Debug + Sync {
         if impacted {
             mut_base(self).thread_id = parent_thread_id;
             self.assign_block_size(layout_context);
+            self.store_overflow(layout_context);
             mut_base(self).restyle_damage.remove(REFLOW_OUT_OF_FLOW | REFLOW);
         }
         impacted
+    }
+
+    /// Calculate and set overflow for current flow.
+    ///
+    /// CSS Section 11.1
+    /// This is the union of rectangles of the flows for which we define the
+    /// Containing Block.
+    ///
+    /// FIXME(pcwalton): This should not be a virtual method, but currently is due to a compiler
+    /// bug ("the trait `Sized` is not implemented for `self`").
+    ///
+    /// Assumption: This is called in a bottom-up traversal, so kids' overflows have
+    /// already been set.
+    /// Assumption: Absolute descendants have had their overflow calculated.
+    fn store_overflow(&mut self, _: &LayoutContext) {
+        // Calculate overflow on a per-fragment basis.
+        let mut overflow = self.compute_overflow();
+        match self.class() {
+            FlowClass::Block |
+            FlowClass::TableCaption |
+            FlowClass::TableCell if base(self).children.len() != 0 => {
+                // FIXME(#2795): Get the real container size.
+                let container_size = Size2D::zero();
+                for kid in mut_base(self).children.iter_mut() {
+                    if base(kid).flags.contains(IS_ABSOLUTELY_POSITIONED) {
+                        continue
+                    }
+                    let kid_overflow = base(kid).overflow;
+                    let kid_position = base(kid).position.to_physical(base(kid).writing_mode,
+                                                                      container_size);
+                    overflow = overflow.union(&kid_overflow.translate(&kid_position.origin))
+                }
+
+                for kid in mut_base(self).abs_descendants.iter() {
+                    let kid_overflow = base(kid).overflow;
+                    let kid_position = base(kid).position.to_physical(base(kid).writing_mode,
+                                                                      container_size);
+                    overflow = overflow.union(&kid_overflow.translate(&kid_position.origin))
+                }
+            }
+            _ => {}
+        }
+        mut_base(self).overflow = overflow;
     }
 
     /// Phase 4 of reflow: computes absolute positions.
@@ -358,7 +407,7 @@ pub fn child_iter<'a>(flow: &'a mut Flow) -> MutFlowListIterator<'a> {
 pub trait ImmutableFlowUtils {
     // Convenience functions
 
-    /// Returns true if this flow is a block or a float flow.
+    /// Returns true if this flow is a block flow or subclass thereof.
     fn is_block_like(self) -> bool;
 
     /// Returns true if this flow is a table flow.
@@ -424,9 +473,6 @@ pub trait MutableFlowUtils {
 
     // Mutators
 
-    /// Computes the overflow region for this flow.
-    fn store_overflow(self, _: &LayoutContext);
-
     /// Calls `repair_style` and `bubble_inline_sizes`. You should use this method instead of
     /// calling them individually, since there is no reason not to perform both operations.
     fn repair_style_and_bubble_inline_sizes(self, style: &Arc<ComputedValues>);
@@ -451,6 +497,7 @@ pub enum FlowClass {
     TableRow,
     TableCaption,
     TableCell,
+    Multicol,
 }
 
 /// A top-down traversal.
@@ -575,13 +622,13 @@ impl FlowFlags {
 
     #[inline]
     pub fn text_align(self) -> text_align::T {
-        FromPrimitive::from_u32((self & TEXT_ALIGN).bits() >> TEXT_ALIGN_SHIFT).unwrap()
+        text_align::T::from_u32((self & TEXT_ALIGN).bits() >> TEXT_ALIGN_SHIFT).unwrap()
     }
 
     #[inline]
     pub fn set_text_align(&mut self, value: text_align::T) {
         *self = (*self & !TEXT_ALIGN) |
-            FlowFlags::from_bits((value as u32) << TEXT_ALIGN_SHIFT).unwrap();
+                FlowFlags::from_bits(value.to_u32() << TEXT_ALIGN_SHIFT).unwrap();
     }
 
     #[inline]
@@ -693,7 +740,7 @@ pub type DescendantOffsetIter<'a> = Zip<DescendantIter<'a>, IterMut<'a, Au>>;
 
 /// Information needed to compute absolute (i.e. viewport-relative) flow positions (not to be
 /// confused with absolutely-positioned flows).
-#[derive(RustcEncodable, Copy)]
+#[derive(RustcEncodable, Copy, Clone)]
 pub struct AbsolutePositionInfo {
     /// The size of the containing block for relatively-positioned descendants.
     pub relative_containing_block_size: LogicalSize<Au>,
@@ -790,20 +837,11 @@ pub struct BaseFlow {
     /// depend on content heights).  Used for computing percentage values for `height`.
     pub block_container_explicit_block_size: Option<Au>,
 
-    /// Offset wrt the nearest positioned ancestor - aka the Containing Block
-    /// for any absolutely positioned elements.
-    pub absolute_static_i_offset: Au,
-
-    /// Offset wrt the Initial Containing Block.
-    pub fixed_static_i_offset: Au,
-
     /// Reference to the Containing Block, if this flow is absolutely positioned.
     pub absolute_cb: ContainingBlockLink,
 
     /// Information needed to compute absolute (i.e. viewport-relative) flow positions (not to be
     /// confused with absolutely-positioned flows).
-    ///
-    /// FIXME(pcwalton): Merge with `absolute_static_i_offset` and `fixed_static_i_offset` above?
     pub absolute_position_info: AbsolutePositionInfo,
 
     /// The clipping region for this flow and its descendants, in layer coordinates.
@@ -878,7 +916,6 @@ impl Encodable for BaseFlow {
     }
 }
 
-#[unsafe_destructor]
 impl Drop for BaseFlow {
     fn drop(&mut self) {
         if self.strong_ref_count.load(Ordering::SeqCst) != 0 &&
@@ -968,8 +1005,6 @@ impl BaseFlow {
             collapsible_margins: CollapsibleMargins::new(),
             stacking_relative_position: Point2D::zero(),
             abs_descendants: Descendants::new(),
-            absolute_static_i_offset: Au(0),
-            fixed_static_i_offset: Au(0),
             block_container_inline_size: Au(0),
             block_container_writing_mode: writing_mode,
             block_container_explicit_block_size: None,
@@ -1234,41 +1269,6 @@ impl<'a> MutableFlowUtils for &'a mut (Flow + 'a) {
         }
     }
 
-    /// Calculate and set overflow for current flow.
-    ///
-    /// CSS Section 11.1
-    /// This is the union of rectangles of the flows for which we define the
-    /// Containing Block.
-    ///
-    /// Assumption: This is called in a bottom-up traversal, so kids' overflows have
-    /// already been set.
-    /// Assumption: Absolute descendants have had their overflow calculated.
-    fn store_overflow(self, _: &LayoutContext) {
-        // Calculate overflow on a per-fragment basis.
-        let mut overflow = self.compute_overflow();
-        if self.is_block_container() {
-            // FIXME(#2795): Get the real container size.
-            let container_size = Size2D::zero();
-            for kid in child_iter(self) {
-                if base(kid).flags.contains(IS_ABSOLUTELY_POSITIONED) {
-                    continue
-                }
-                let kid_overflow = base(kid).overflow;
-                let kid_position = base(kid).position.to_physical(base(kid).writing_mode,
-                                                                  container_size);
-                overflow = overflow.union(&kid_overflow.translate(&kid_position.origin))
-            }
-
-            for kid in mut_base(self).abs_descendants.iter() {
-                let kid_overflow = base(kid).overflow;
-                let kid_position = base(kid).position.to_physical(base(kid).writing_mode,
-                                                                  container_size);
-                overflow = overflow.union(&kid_overflow.translate(&kid_position.origin))
-            }
-        }
-
-        mut_base(self).overflow = overflow;
-    }
 
     /// Calls `repair_style` and `bubble_inline_sizes`. You should use this method instead of
     /// calling them individually, since there is no reason not to perform both operations.

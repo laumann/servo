@@ -4,6 +4,7 @@
 
 //! The core DOM types. Defines the basic DOM hierarchy as well as all the HTML elements.
 
+use document_loader::DocumentLoader;
 use dom::attr::{Attr, AttrHelpers};
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
@@ -24,13 +25,14 @@ use dom::bindings::conversions;
 use dom::bindings::error::{ErrorResult, Fallible};
 use dom::bindings::error::Error::{NotFound, HierarchyRequest, Syntax};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, JSRef, LayoutJS, RootedReference, Temporary, Root, Unrooted};
-use dom::bindings::js::{TemporaryPushable, OptionalRootedRootable};
-use dom::bindings::js::{ResultRootable, OptionalRootable, MutNullableJS};
+use dom::bindings::js::{JS, JSRef, LayoutJS, MutNullableHeap};
+use dom::bindings::js::{OptionalRootable, ResultRootable, Root, Rootable};
+use dom::bindings::js::{RootedReference, Temporary, TemporaryPushable};
+use dom::bindings::js::Unrooted;
 use dom::bindings::trace::JSTraceable;
 use dom::bindings::trace::RootedVec;
 use dom::bindings::utils::{Reflectable, reflect_dom_object};
-use dom::characterdata::{CharacterData, CharacterDataHelpers};
+use dom::characterdata::{CharacterData, CharacterDataHelpers, CharacterDataTypeId};
 use dom::comment::Comment;
 use dom::document::{Document, DocumentHelpers, IsHTMLDocument, DocumentSource};
 use dom::documentfragment::DocumentFragment;
@@ -69,7 +71,7 @@ use std::iter::{FilterMap, Peekable};
 use std::mem;
 use std::sync::Arc;
 use uuid;
-use string_cache::QualName;
+use string_cache::{Atom, QualName};
 
 //
 // The basic Node structure
@@ -85,25 +87,25 @@ pub struct Node {
     type_id: NodeTypeId,
 
     /// The parent of this node.
-    parent_node: MutNullableJS<Node>,
+    parent_node: MutNullableHeap<JS<Node>>,
 
     /// The first child of this node.
-    first_child: MutNullableJS<Node>,
+    first_child: MutNullableHeap<JS<Node>>,
 
     /// The last child of this node.
-    last_child: MutNullableJS<Node>,
+    last_child: MutNullableHeap<JS<Node>>,
 
     /// The next sibling of this node.
-    next_sibling: MutNullableJS<Node>,
+    next_sibling: MutNullableHeap<JS<Node>>,
 
     /// The previous sibling of this node.
-    prev_sibling: MutNullableJS<Node>,
+    prev_sibling: MutNullableHeap<JS<Node>>,
 
     /// The document that this node belongs to.
-    owner_doc: MutNullableJS<Document>,
+    owner_doc: MutNullableHeap<JS<Document>>,
 
     /// The live list of children return by .childNodes.
-    child_list: MutNullableJS<NodeList>,
+    child_list: MutNullableHeap<JS<NodeList>>,
 
     /// A bitfield of flags for node items.
     flags: Cell<NodeFlags>,
@@ -178,7 +180,6 @@ impl NodeFlags {
     }
 }
 
-#[unsafe_destructor]
 impl Drop for Node {
     #[allow(unsafe_code)]
     fn drop(&mut self) {
@@ -189,7 +190,7 @@ impl Drop for Node {
 /// suppress observers flag
 /// https://dom.spec.whatwg.org/#concept-node-insert
 /// https://dom.spec.whatwg.org/#concept-node-remove
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 enum SuppressObserver {
     Suppressed,
     Unsuppressed
@@ -265,16 +266,14 @@ impl LayoutDataRef {
 }
 
 /// The different types of nodes.
-#[derive(Copy, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 #[jstraceable]
 pub enum NodeTypeId {
+    CharacterData(CharacterDataTypeId),
     DocumentType,
     DocumentFragment,
-    Comment,
     Document,
     Element(ElementTypeId),
-    Text,
-    ProcessingInstruction,
 }
 
 trait PrivateNodeHelpers {
@@ -287,7 +286,7 @@ trait PrivateNodeHelpers {
 impl<'a> PrivateNodeHelpers for JSRef<'a, Node> {
     // https://dom.spec.whatwg.org/#node-is-inserted
     fn node_inserted(self) {
-        assert!(self.parent_node().is_some());
+        assert!(self.parent_node.get().is_some());
         let document = document_from_node(self).root();
         let is_in_doc = self.is_in_doc();
 
@@ -296,14 +295,14 @@ impl<'a> PrivateNodeHelpers for JSRef<'a, Node> {
             vtable_for(&node.r()).bind_to_tree(is_in_doc);
         }
 
-        let parent = self.parent_node().root();
-        parent.map(|parent| vtable_for(&parent.r()).child_inserted(self));
+        let parent = self.parent_node.get().root();
+        parent.r().map(|parent| vtable_for(&parent).child_inserted(self));
         document.r().content_and_heritage_changed(self, NodeDamage::OtherNodeDamage);
     }
 
     // https://dom.spec.whatwg.org/#node-is-removed
     fn node_removed(self, parent_in_doc: bool) {
-        assert!(self.parent_node().is_none());
+        assert!(self.parent_node.get().is_none());
         for node in self.traverse_preorder() {
             let node = node.root();
             vtable_for(&node.r()).unbind_from_tree(parent_in_doc);
@@ -319,69 +318,69 @@ impl<'a> PrivateNodeHelpers for JSRef<'a, Node> {
     ///
     /// Fails unless `new_child` is disconnected from the tree.
     fn add_child(self, new_child: JSRef<Node>, before: Option<JSRef<Node>>) {
-        assert!(new_child.parent_node().is_none());
-        assert!(new_child.prev_sibling().is_none());
-        assert!(new_child.next_sibling().is_none());
+        assert!(new_child.parent_node.get().is_none());
+        assert!(new_child.prev_sibling.get().is_none());
+        assert!(new_child.next_sibling.get().is_none());
         match before {
             Some(ref before) => {
-                assert!(before.parent_node().root().r() == Some(self));
-                match before.prev_sibling().root() {
+                assert!(before.parent_node.get().root().r() == Some(self));
+                match before.prev_sibling.get().root() {
                     None => {
-                        assert!(Some(*before) == self.first_child().root().r());
-                        self.first_child.assign(Some(new_child));
+                        assert!(Some(*before) == self.first_child.get().root().r());
+                        self.first_child.set(Some(JS::from_rooted(new_child)));
                     },
-                    Some(prev_sibling) => {
-                        prev_sibling.r().next_sibling.assign(Some(new_child));
-                        new_child.prev_sibling.assign(Some(prev_sibling.r()));
+                    Some(ref prev_sibling) => {
+                        prev_sibling.r().next_sibling.set(Some(JS::from_rooted(new_child)));
+                        new_child.prev_sibling.set(Some(JS::from_rooted(prev_sibling.r())));
                     },
                 }
-                before.prev_sibling.assign(Some(new_child));
-                new_child.next_sibling.assign(Some(*before));
+                before.prev_sibling.set(Some(JS::from_rooted(new_child)));
+                new_child.next_sibling.set(Some(JS::from_rooted(*before)));
             },
             None => {
-                match self.last_child().root() {
-                    None => self.first_child.assign(Some(new_child)),
-                    Some(last_child) => {
-                        assert!(last_child.r().next_sibling().is_none());
-                        last_child.r().next_sibling.assign(Some(new_child));
-                        new_child.prev_sibling.assign(Some(last_child.r()));
+                match self.last_child.get().root() {
+                    None => self.first_child.set(Some(JS::from_rooted(new_child))),
+                    Some(ref last_child) => {
+                        assert!(last_child.r().next_sibling.get().is_none());
+                        last_child.r().next_sibling.set(Some(JS::from_rooted(new_child)));
+                        new_child.prev_sibling.set(Some(JS::from_rooted(last_child.r())));
                     }
                 }
 
-                self.last_child.assign(Some(new_child));
+                self.last_child.set(Some(JS::from_rooted(new_child)));
             },
         }
 
-        new_child.parent_node.assign(Some(self));
+        new_child.parent_node.set(Some(JS::from_rooted(self)));
     }
 
     /// Removes the given child from this node's list of children.
     ///
     /// Fails unless `child` is a child of this node.
     fn remove_child(self, child: JSRef<Node>) {
-        assert!(child.parent_node().root().r() == Some(self));
+        assert!(child.parent_node.get().root().r() == Some(self));
 
         match child.prev_sibling.get().root() {
             None => {
-                self.first_child.assign(child.next_sibling.get());
+                self.first_child.set(child.next_sibling.get());
             }
-            Some(prev_sibling) => {
-                prev_sibling.r().next_sibling.assign(child.next_sibling.get());
+            Some(ref prev_sibling) => {
+                prev_sibling.r().next_sibling.set(child.next_sibling.get());
             }
         }
 
         match child.next_sibling.get().root() {
             None => {
-                self.last_child.assign(child.prev_sibling.get());
+                self.last_child.set(child.prev_sibling.get());
             }
-            Some(next_sibling) => {
-                next_sibling.r().prev_sibling.assign(child.prev_sibling.get());
+            Some(ref next_sibling) => {
+                next_sibling.r().prev_sibling.set(child.prev_sibling.get());
             }
         }
 
-        child.prev_sibling.clear();
-        child.next_sibling.clear();
-        child.parent_node.clear();
+        child.prev_sibling.set(None);
+        child.next_sibling.set(None);
+        child.parent_node.set(None);
     }
 }
 
@@ -428,12 +427,8 @@ pub trait NodeHelpers {
     fn is_parent_of(self, child: JSRef<Node>) -> bool;
 
     fn type_id(self) -> NodeTypeId;
-
-    fn parent_node(self) -> Option<Temporary<Node>>;
-    fn first_child(self) -> Option<Temporary<Node>>;
-    fn last_child(self) -> Option<Temporary<Node>>;
-    fn prev_sibling(self) -> Option<Temporary<Node>>;
-    fn next_sibling(self) -> Option<Temporary<Node>>;
+    fn len(self) -> u32;
+    fn index(self) -> u32;
 
     fn owner_doc(self) -> Temporary<Document>;
     fn set_owner_doc(self, document: JSRef<Document>);
@@ -544,7 +539,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
             s.push_str("    ");
         }
 
-        s.push_str(self.debug_str().as_slice());
+        s.push_str(&*self.debug_str());
         debug!("{:?}", s);
 
         // FIXME: this should have a pure version?
@@ -568,26 +563,20 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
         self.type_id
     }
 
-    fn parent_node(self) -> Option<Temporary<Node>> {
-        self.parent_node.get()
+    // https://dom.spec.whatwg.org/#concept-node-length
+    fn len(self) -> u32 {
+        match self.type_id {
+            NodeTypeId::DocumentType => 0,
+            NodeTypeId::CharacterData(_) => {
+                CharacterDataCast::to_ref(self).unwrap().Length()
+            },
+            _ => self.children().count() as u32
+        }
     }
 
-    fn first_child(self) -> Option<Temporary<Node>> {
-        self.first_child.get()
-    }
-
-    fn last_child(self) -> Option<Temporary<Node>> {
-        self.last_child.get()
-    }
-
-    /// Returns the previous sibling of this node. Fails if this node is borrowed mutably.
-    fn prev_sibling(self) -> Option<Temporary<Node>> {
-        self.prev_sibling.get()
-    }
-
-    /// Returns the next sibling of this node. Fails if this node is borrowed mutably.
-    fn next_sibling(self) -> Option<Temporary<Node>> {
-        self.next_sibling.get()
+    // https://dom.spec.whatwg.org/#concept-tree-index
+    fn index(self) -> u32 {
+        self.preceding_siblings().count() as u32
     }
 
     #[inline]
@@ -615,7 +604,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     #[inline]
     fn is_text(self) -> bool {
-        self.type_id == NodeTypeId::Text
+        self.type_id == NodeTypeId::CharacterData(CharacterDataTypeId::Text)
     }
 
     fn get_flag(self, flag: NodeFlags) -> bool {
@@ -740,12 +729,12 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
         // selectors. Maybe we can do something smarter in the future.
         if !self.get_has_dirty_siblings() {
             let parent =
-                match self.parent_node() {
+                match self.parent_node.get() {
                     None         => return,
                     Some(parent) => parent,
-                };
+                }.root();
 
-            for sibling in parent.root().r().children() {
+            for sibling in parent.r().children() {
                 let sibling = sibling.root();
                 sibling.r().set_has_dirty_siblings(true);
             }
@@ -782,20 +771,20 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     fn following_siblings(self) -> NodeSiblingIterator {
         NodeSiblingIterator {
-            current: self.next_sibling(),
+            current: self.GetNextSibling(),
         }
     }
 
     fn preceding_siblings(self) -> ReverseSiblingIterator {
         ReverseSiblingIterator {
-            current: self.prev_sibling(),
+            current: self.GetPreviousSibling(),
         }
     }
 
     fn is_parent_of(self, child: JSRef<Node>) -> bool {
-        match child.parent_node() {
-            Some(ref parent) if parent == &Temporary::from_rooted(self) => true,
-            _ => false
+        match child.parent_node.get().root() {
+            Some(ref parent) => parent.r() == self,
+            None => false,
         }
     }
 
@@ -813,7 +802,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     // https://dom.spec.whatwg.org/#dom-childnode-before
     fn before(self, nodes: Vec<NodeOrString>) -> ErrorResult {
-        match self.parent_node().root() {
+        match self.parent_node.get().root() {
             None => {
                 // Step 1.
                 Ok(())
@@ -831,7 +820,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     // https://dom.spec.whatwg.org/#dom-childnode-after
     fn after(self, nodes: Vec<NodeOrString>) -> ErrorResult {
-        match self.parent_node().root() {
+        match self.parent_node.get().root() {
             None => {
                 // Step 1.
                 Ok(())
@@ -842,7 +831,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
                 let node = try!(doc.r().node_from_nodes_and_strings(nodes)).root();
                 // Step 3.
                 // FIXME(https://github.com/servo/servo/issues/5720)
-                let next_sibling = self.next_sibling().root();
+                let next_sibling = self.next_sibling.get().root();
                 Node::pre_insert(node.r(), parent_node.r(),
                                  next_sibling.r()).map(|_| ())
             },
@@ -851,7 +840,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     // https://dom.spec.whatwg.org/#dom-childnode-replacewith
     fn replace_with(self, nodes: Vec<NodeOrString>) -> ErrorResult {
-        match self.parent_node().root() {
+        match self.parent_node.get().root() {
             None => {
                 // Step 1.
                 Ok(())
@@ -872,7 +861,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
         let doc = self.owner_doc().root();
         let node = try!(doc.r().node_from_nodes_and_strings(nodes)).root();
         // Step 2.
-        let first_child = self.first_child().root();
+        let first_child = self.first_child.get().root();
         Node::pre_insert(node.r(), self, first_child.r()).map(|_| ())
     }
 
@@ -888,7 +877,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
     // https://dom.spec.whatwg.org/#dom-parentnode-queryselector
     fn query_selector(self, selectors: DOMString) -> Fallible<Option<Temporary<Element>>> {
         // Step 1.
-        match parse_author_origin_selector_list_from_str(selectors.as_slice()) {
+        match parse_author_origin_selector_list_from_str(&selectors) {
             // Step 2.
             Err(()) => return Err(Syntax),
             // Step 3.
@@ -909,7 +898,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
     unsafe fn query_selector_iter(self, selectors: DOMString)
                                   -> Fallible<QuerySelectorIterator> {
         // Step 1.
-        match parse_author_origin_selector_list_from_str(selectors.as_slice()) {
+        match parse_author_origin_selector_list_from_str(&selectors) {
             // Step 2.
             Err(()) => Err(Syntax),
             // Step 3.
@@ -935,7 +924,7 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     fn ancestors(self) -> AncestorIterator {
         AncestorIterator {
-            current: self.parent_node()
+            current: self.GetParentNode()
         }
     }
 
@@ -946,11 +935,11 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
     }
 
     fn owner_doc(self) -> Temporary<Document> {
-        self.owner_doc.get().unwrap()
+        Temporary::from_rooted(self.owner_doc.get().unwrap())
     }
 
     fn set_owner_doc(self, document: JSRef<Document>) {
-        self.owner_doc.assign(Some(document.clone()));
+        self.owner_doc.set(Some(JS::from_rooted(document)));
     }
 
     fn is_in_html_doc(self) -> bool {
@@ -959,45 +948,45 @@ impl<'a> NodeHelpers for JSRef<'a, Node> {
 
     fn children(self) -> NodeSiblingIterator {
         NodeSiblingIterator {
-            current: self.first_child.get(),
+            current: self.GetFirstChild(),
         }
     }
 
     fn rev_children(self) -> ReverseSiblingIterator {
         ReverseSiblingIterator {
-            current: self.last_child(),
+            current: self.GetLastChild(),
         }
     }
 
     fn child_elements(self) -> ChildElementIterator {
+        fn to_temporary(node: Temporary<Node>) -> Option<Temporary<Element>> {
+            ElementCast::to_temporary(node)
+        }
         self.children()
-            .filter_map(ElementCast::to_temporary as fn(_) -> _)
+            .filter_map(to_temporary as fn(_) -> _)
             .peekable()
     }
 
     fn remove_self(self) {
-        match self.parent_node().root() {
-            Some(parent) => parent.r().remove_child(self),
+        match self.parent_node.get().root() {
+            Some(ref parent) => parent.r().remove_child(self),
             None => ()
         }
     }
 
     fn get_unique_id(self) -> String {
         // FIXME(https://github.com/rust-lang/rust/issues/23338)
+        if self.unique_id.borrow().is_empty() {
+            let mut unique_id = self.unique_id.borrow_mut();
+            *unique_id = uuid::Uuid::new_v4().to_simple_string();
+        }
         let id = self.unique_id.borrow();
         id.clone()
     }
 
     fn summarize(self) -> NodeInfo {
-        if self.unique_id.borrow().is_empty() {
-            let mut unique_id = self.unique_id.borrow_mut();
-            *unique_id = uuid::Uuid::new_v4().to_simple_string();
-        }
-
-        // FIXME(https://github.com/rust-lang/rust/issues/23338)
-        let unique_id = self.unique_id.borrow();
         NodeInfo {
-            uniqueId: unique_id.clone(),
+            uniqueId: self.get_unique_id(),
             baseURI: self.GetBaseURI().unwrap_or("".to_owned()),
             parent: self.GetParentNode().root().map(|node| node.r().get_unique_id()).unwrap_or("".to_owned()),
             nodeType: self.NodeType(),
@@ -1224,7 +1213,7 @@ impl Iterator for NodeSiblingIterator {
             None => return None,
             Some(current) => current,
         }.root();
-        self.current = current.r().next_sibling();
+        self.current = current.r().GetNextSibling();
         Some(Temporary::from_rooted(current.r()))
     }
 }
@@ -1241,7 +1230,7 @@ impl Iterator for ReverseSiblingIterator {
             None => return None,
             Some(current) => current,
         }.root();
-        self.current = current.r().prev_sibling();
+        self.current = current.r().GetPreviousSibling();
         Some(Temporary::from_rooted(current.r()))
     }
 }
@@ -1258,7 +1247,7 @@ impl Iterator for AncestorIterator {
             None => return None,
             Some(current) => current,
         }.root();
-        self.current = current.r().parent_node();
+        self.current = current.r().GetParentNode();
         Some(Temporary::from_rooted(current.r()))
     }
 }
@@ -1287,7 +1276,7 @@ impl Iterator for TreeIterator {
             Some(current) => current,
         };
         let node = current.root();
-        if let Some(first_child) = node.r().first_child() {
+        if let Some(first_child) = node.r().GetFirstChild() {
             self.current = Some(first_child);
             self.depth += 1;
             return Some(current);
@@ -1296,7 +1285,7 @@ impl Iterator for TreeIterator {
             if self.depth == 0 {
                 break;
             }
-            if let Some(next_sibling) = ancestor.root().r().next_sibling() {
+            if let Some(next_sibling) = ancestor.root().r().GetNextSibling() {
                 self.current = Some(next_sibling);
                 return Some(current);
             }
@@ -1310,7 +1299,7 @@ impl Iterator for TreeIterator {
 
 
 /// Specifies whether children must be recursively cloned or not.
-#[derive(Copy, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum CloneChildrenFlag {
     CloneChildren,
     DoNotCloneChildren
@@ -1346,7 +1335,7 @@ impl Node {
             last_child: Default::default(),
             next_sibling: Default::default(),
             prev_sibling: Default::default(),
-            owner_doc: MutNullableJS::new(doc),
+            owner_doc: MutNullableHeap::new(doc.map(JS::from_rooted)),
             child_list: Default::default(),
             flags: Cell::new(NodeFlags::new(type_id)),
 
@@ -1375,8 +1364,8 @@ impl Node {
     // https://dom.spec.whatwg.org/#concept-node-adopt
     pub fn adopt(node: JSRef<Node>, document: JSRef<Document>) {
         // Step 1.
-        match node.parent_node().root() {
-            Some(parent) => {
+        match node.parent_node.get().root() {
+            Some(ref parent) => {
                 Node::remove(node, parent.r(), SuppressObserver::Unsuppressed);
             }
             None => (),
@@ -1419,7 +1408,7 @@ impl Node {
 
         // Step 4-5.
         match node.type_id() {
-            NodeTypeId::Text => {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) => {
                 if parent.is_document() {
                     return Err(HierarchyRequest);
                 }
@@ -1431,8 +1420,8 @@ impl Node {
             },
             NodeTypeId::DocumentFragment |
             NodeTypeId::Element(_) |
-            NodeTypeId::ProcessingInstruction |
-            NodeTypeId::Comment => (),
+            NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) |
+            NodeTypeId::CharacterData(CharacterDataTypeId::Comment) => (),
             NodeTypeId::Document => return Err(HierarchyRequest)
         }
 
@@ -1506,9 +1495,7 @@ impl Node {
                             },
                         }
                     },
-                    NodeTypeId::Text |
-                    NodeTypeId::ProcessingInstruction |
-                    NodeTypeId::Comment => (),
+                    NodeTypeId::CharacterData(_) => (),
                     NodeTypeId::Document => unreachable!(),
                 }
             },
@@ -1517,7 +1504,7 @@ impl Node {
 
         // Step 7-8.
         let reference_child = match child {
-            Some(child) if child == node => node.next_sibling(),
+            Some(child) if child == node => node.GetNextSibling(),
             _ => None
         }.root();
         let reference_child = reference_child.r().or(child);
@@ -1655,7 +1642,7 @@ impl Node {
     // https://dom.spec.whatwg.org/#concept-node-pre-remove
     fn pre_remove(child: JSRef<Node>, parent: JSRef<Node>) -> Fallible<Temporary<Node>> {
         // Step 1.
-        match child.parent_node() {
+        match child.GetParentNode() {
             Some(ref node) if node != &Temporary::from_rooted(parent) => return Err(NotFound),
             None => return Err(NotFound),
             _ => ()
@@ -1670,7 +1657,7 @@ impl Node {
 
     // https://dom.spec.whatwg.org/#concept-node-remove
     fn remove(node: JSRef<Node>, parent: JSRef<Node>, suppress_observers: SuppressObserver) {
-        assert!(node.parent_node().map_or(false, |node_parent| node_parent == Temporary::from_rooted(parent)));
+        assert!(node.GetParentNode().map_or(false, |node_parent| node_parent == Temporary::from_rooted(parent)));
 
         // Step 1-5: ranges.
         // Step 6-7: mutation observers.
@@ -1710,7 +1697,7 @@ impl Node {
                 let doc_fragment = DocumentFragment::new(document.r());
                 NodeCast::from_temporary(doc_fragment)
             },
-            NodeTypeId::Comment => {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Comment) => {
                 let cdata = CharacterDataCast::to_ref(node).unwrap();
                 let comment = Comment::new(cdata.Data(), document.r());
                 NodeCast::from_temporary(comment)
@@ -1722,9 +1709,10 @@ impl Node {
                     false => IsHTMLDocument::NonHTMLDocument,
                 };
                 let window = document.window().root();
+                let loader = DocumentLoader::new(&*document.loader());
                 let document = Document::new(window.r(), Some(document.url()),
                                              is_html_doc, None,
-                                             None, DocumentSource::NotFromParser);
+                                             None, DocumentSource::NotFromParser, loader);
                 NodeCast::from_temporary(document)
             },
             NodeTypeId::Element(..) => {
@@ -1734,16 +1722,16 @@ impl Node {
                     local: element.local_name().clone()
                 };
                 let element = Element::create(name,
-                    element.prefix().as_ref().map(|p| p.as_slice().to_owned()),
+                    element.prefix().as_ref().map(|p| Atom::from_slice(&p)),
                     document.r(), ElementCreator::ScriptCreated);
                 NodeCast::from_temporary(element)
             },
-            NodeTypeId::Text => {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) => {
                 let cdata = CharacterDataCast::to_ref(node).unwrap();
                 let text = Text::new(cdata.Data(), document.r());
                 NodeCast::from_temporary(text)
             },
-            NodeTypeId::ProcessingInstruction => {
+            NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) => {
                 let pi: JSRef<ProcessingInstruction> = ProcessingInstructionCast::to_ref(node).unwrap();
                 let pi = ProcessingInstruction::new(pi.Target(),
                                                     CharacterDataCast::from_ref(pi).Data(), document.r());
@@ -1772,7 +1760,7 @@ impl Node {
 
                 // FIXME: https://github.com/mozilla/servo/issues/1737
                 let window = document.window().root();
-                for attr in node_elem.attrs().iter().map(|attr| attr.root()) {
+                for ref attr in node_elem.attrs().iter().map(|attr| attr.root()) {
                     copy_elem.attrs_mut().push_unrooted(
                         &Attr::new(window.r(),
                                    attr.r().local_name().clone(), attr.r().value().clone(),
@@ -1818,13 +1806,13 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
     // https://dom.spec.whatwg.org/#dom-node-nodetype
     fn NodeType(self) -> u16 {
         match self.type_id {
-            NodeTypeId::Element(_)            => NodeConstants::ELEMENT_NODE,
-            NodeTypeId::Text                  => NodeConstants::TEXT_NODE,
-            NodeTypeId::ProcessingInstruction => NodeConstants::PROCESSING_INSTRUCTION_NODE,
-            NodeTypeId::Comment               => NodeConstants::COMMENT_NODE,
-            NodeTypeId::Document              => NodeConstants::DOCUMENT_NODE,
-            NodeTypeId::DocumentType          => NodeConstants::DOCUMENT_TYPE_NODE,
-            NodeTypeId::DocumentFragment      => NodeConstants::DOCUMENT_FRAGMENT_NODE,
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text)                  => NodeConstants::TEXT_NODE,
+            NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) => NodeConstants::PROCESSING_INSTRUCTION_NODE,
+            NodeTypeId::CharacterData(CharacterDataTypeId::Comment)               => NodeConstants::COMMENT_NODE,
+            NodeTypeId::Document                                                  => NodeConstants::DOCUMENT_NODE,
+            NodeTypeId::DocumentType                                              => NodeConstants::DOCUMENT_TYPE_NODE,
+            NodeTypeId::DocumentFragment                                          => NodeConstants::DOCUMENT_FRAGMENT_NODE,
+            NodeTypeId::Element(_)                                                => NodeConstants::ELEMENT_NODE,
         }
     }
 
@@ -1835,13 +1823,13 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
                 let elem: JSRef<Element> = ElementCast::to_ref(self).unwrap();
                 elem.TagName()
             }
-            NodeTypeId::Text => "#text".to_owned(),
-            NodeTypeId::ProcessingInstruction => {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) => "#text".to_owned(),
+            NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) => {
                 let processing_instruction: JSRef<ProcessingInstruction> =
                     ProcessingInstructionCast::to_ref(self).unwrap();
                 processing_instruction.Target()
             }
-            NodeTypeId::Comment => "#comment".to_owned(),
+            NodeTypeId::CharacterData(CharacterDataTypeId::Comment) => "#comment".to_owned(),
             NodeTypeId::DocumentType => {
                 let doctype: JSRef<DocumentType> = DocumentTypeCast::to_ref(self).unwrap();
                 doctype.name().clone()
@@ -1860,10 +1848,8 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
     // https://dom.spec.whatwg.org/#dom-node-ownerdocument
     fn GetOwnerDocument(self) -> Option<Temporary<Document>> {
         match self.type_id {
+            NodeTypeId::CharacterData(..) |
             NodeTypeId::Element(..) |
-            NodeTypeId::Comment |
-            NodeTypeId::Text |
-            NodeTypeId::ProcessingInstruction |
             NodeTypeId::DocumentType |
             NodeTypeId::DocumentFragment => Some(self.owner_doc()),
             NodeTypeId::Document => None
@@ -1872,18 +1858,12 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
 
     // https://dom.spec.whatwg.org/#dom-node-parentnode
     fn GetParentNode(self) -> Option<Temporary<Node>> {
-        self.parent_node.get()
+        self.parent_node.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-node-parentelement
     fn GetParentElement(self) -> Option<Temporary<Element>> {
-        self.parent_node.get()
-                        .and_then(|parent| {
-                            let parent = parent.root();
-                            ElementCast::to_ref(parent.r()).map(|elem| {
-                                Temporary::from_rooted(elem)
-                            })
-                        })
+        self.GetParentNode().and_then(ElementCast::to_temporary)
     }
 
     // https://dom.spec.whatwg.org/#dom-node-haschildnodes
@@ -1902,30 +1882,28 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
 
     // https://dom.spec.whatwg.org/#dom-node-firstchild
     fn GetFirstChild(self) -> Option<Temporary<Node>> {
-        self.first_child.get()
+        self.first_child.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-node-lastchild
     fn GetLastChild(self) -> Option<Temporary<Node>> {
-        self.last_child.get()
+        self.last_child.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-node-previoussibling
     fn GetPreviousSibling(self) -> Option<Temporary<Node>> {
-        self.prev_sibling.get()
+        self.prev_sibling.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-node-nextsibling
     fn GetNextSibling(self) -> Option<Temporary<Node>> {
-        self.next_sibling.get()
+        self.next_sibling.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-node-nodevalue
     fn GetNodeValue(self) -> Option<DOMString> {
         match self.type_id {
-            NodeTypeId::Comment |
-            NodeTypeId::Text |
-            NodeTypeId::ProcessingInstruction => {
+            NodeTypeId::CharacterData(..) => {
                 let chardata: JSRef<CharacterData> = CharacterDataCast::to_ref(self).unwrap();
                 Some(chardata.Data())
             }
@@ -1938,9 +1916,7 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
     // https://dom.spec.whatwg.org/#dom-node-nodevalue
     fn SetNodeValue(self, val: Option<DOMString>) {
         match self.type_id {
-            NodeTypeId::Comment |
-            NodeTypeId::Text |
-            NodeTypeId::ProcessingInstruction => {
+            NodeTypeId::CharacterData(..) => {
                 self.SetTextContent(val)
             }
             _ => {}
@@ -1955,9 +1931,7 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
                 let content = Node::collect_text_contents(self.traverse_preorder());
                 Some(content)
             }
-            NodeTypeId::Comment |
-            NodeTypeId::Text |
-            NodeTypeId::ProcessingInstruction => {
+            NodeTypeId::CharacterData(..) => {
                 let characterdata: JSRef<CharacterData> = CharacterDataCast::to_ref(self).unwrap();
                 Some(characterdata.Data())
             }
@@ -1985,9 +1959,7 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
                 // Step 3.
                 Node::replace_all(node.r(), self);
             }
-            NodeTypeId::Comment |
-            NodeTypeId::Text |
-            NodeTypeId::ProcessingInstruction => {
+            NodeTypeId::CharacterData(..) => {
                 let characterdata: JSRef<CharacterData> = CharacterDataCast::to_ref(self).unwrap();
                 characterdata.SetData(value);
 
@@ -2033,14 +2005,12 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
 
         // Step 4-5.
         match node.type_id() {
-            NodeTypeId::Text if self.is_document() => return Err(HierarchyRequest),
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) if self.is_document() => return Err(HierarchyRequest),
             NodeTypeId::DocumentType if !self.is_document() => return Err(HierarchyRequest),
             NodeTypeId::DocumentFragment |
             NodeTypeId::DocumentType |
             NodeTypeId::Element(..) |
-            NodeTypeId::Text |
-            NodeTypeId::ProcessingInstruction |
-            NodeTypeId::Comment => (),
+            NodeTypeId::CharacterData(..) => (),
             NodeTypeId::Document => return Err(HierarchyRequest)
         }
 
@@ -2106,9 +2076,7 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
                             return Err(HierarchyRequest);
                         }
                     },
-                    NodeTypeId::Text |
-                    NodeTypeId::ProcessingInstruction |
-                    NodeTypeId::Comment => (),
+                    NodeTypeId::CharacterData(..) => (),
                     NodeTypeId::Document => unreachable!()
                 }
             },
@@ -2121,8 +2089,8 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
         }
 
         // Step 7-8.
-        let child_next_sibling = child.next_sibling().root();
-        let node_next_sibling = node.next_sibling().root();
+        let child_next_sibling = child.next_sibling.get().root();
+        let node_next_sibling = node.next_sibling.get().root();
         let reference_child = if child_next_sibling.r() == Some(node) {
             node_next_sibling.r()
         } else {
@@ -2254,7 +2222,7 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
                 other_element.attrs().iter().map(|attr| attr.root()).any(|other_attr| {
                     (*attr.r().namespace() == *other_attr.r().namespace()) &&
                     (attr.r().local_name() == other_attr.r().local_name()) &&
-                    (attr.r().value().as_slice() == other_attr.r().value().as_slice())
+                    (**attr.r().value() == **other_attr.r().value())
                 })
             })
         }
@@ -2268,9 +2236,9 @@ impl<'a> NodeMethods for JSRef<'a, Node> {
                 // Step 3.
                 NodeTypeId::DocumentType if !is_equal_doctype(this, node) => return false,
                 NodeTypeId::Element(..) if !is_equal_element(this, node) => return false,
-                NodeTypeId::ProcessingInstruction if !is_equal_processinginstruction(this, node) => return false,
-                NodeTypeId::Text |
-                NodeTypeId::Comment if !is_equal_characterdata(this, node) => return false,
+                NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) if !is_equal_processinginstruction(this, node) => return false,
+                NodeTypeId::CharacterData(CharacterDataTypeId::Text) |
+                NodeTypeId::CharacterData(CharacterDataTypeId::Comment) if !is_equal_characterdata(this, node) => return false,
                 // Step 4.
                 NodeTypeId::Element(..) if !is_equal_element_attrs(this, node) => return false,
                 _ => ()
@@ -2430,53 +2398,28 @@ impl<'a> style::node::TNode<'a> for JSRef<'a, Node> {
     type Element = JSRef<'a, Element>;
 
     fn parent_node(self) -> Option<JSRef<'a, Node>> {
-        // FIXME(zwarich): Remove this when UFCS lands and there is a better way
-        // of disambiguating methods.
-        fn parent_node<'a, T: NodeHelpers>(this: T) -> Option<Temporary<Node>> {
-            this.parent_node()
-        }
-
-        parent_node(self).map(|node| node.root().get_unsound_ref_forever())
+        (*self).parent_node.get()
+               .map(|node| node.root().get_unsound_ref_forever())
     }
 
     fn first_child(self) -> Option<JSRef<'a, Node>> {
-        // FIXME(zwarich): Remove this when UFCS lands and there is a better way
-        // of disambiguating methods.
-        fn first_child<'a, T: NodeHelpers>(this: T) -> Option<Temporary<Node>> {
-            this.first_child()
-        }
-
-        first_child(self).map(|node| node.root().get_unsound_ref_forever())
+        (*self).first_child.get()
+               .map(|node| node.root().get_unsound_ref_forever())
     }
 
     fn last_child(self) -> Option<JSRef<'a, Node>> {
-        // FIXME(zwarich): Remove this when UFCS lands and there is a better way
-        // of disambiguating methods.
-        fn last_child<'a, T: NodeHelpers>(this: T) -> Option<Temporary<Node>> {
-            this.last_child()
-        }
-
-        last_child(self).map(|node| node.root().get_unsound_ref_forever())
+        (*self).last_child.get()
+               .map(|node| node.root().get_unsound_ref_forever())
     }
 
     fn prev_sibling(self) -> Option<JSRef<'a, Node>> {
-        // FIXME(zwarich): Remove this when UFCS lands and there is a better way
-        // of disambiguating methods.
-        fn prev_sibling<'a, T: NodeHelpers>(this: T) -> Option<Temporary<Node>> {
-            this.prev_sibling()
-        }
-
-        prev_sibling(self).map(|node| node.root().get_unsound_ref_forever())
+        (*self).prev_sibling.get()
+               .map(|node| node.root().get_unsound_ref_forever())
     }
 
     fn next_sibling(self) -> Option<JSRef<'a, Node>> {
-        // FIXME(zwarich): Remove this when UFCS lands and there is a better way
-        // of disambiguating methods.
-        fn next_sibling<'a, T: NodeHelpers>(this: T) -> Option<Temporary<Node>> {
-            this.next_sibling()
-        }
-
-        next_sibling(self).map(|node| node.root().get_unsound_ref_forever())
+        (*self).next_sibling.get()
+               .map(|node| node.root().get_unsound_ref_forever())
     }
 
     fn is_document(self) -> bool {
@@ -2520,17 +2463,17 @@ impl<'a> style::node::TNode<'a> for JSRef<'a, Node> {
                         // FIXME(https://github.com/rust-lang/rust/issues/23338)
                         let attr = attr.r();
                         let value = attr.value();
-                        test(value.as_slice())
+                        test(&value)
                     })
             },
             NamespaceConstraint::Any => {
-                self.as_element().get_attributes(local_name).into_iter()
-                    .map(|attr| attr.root())
-                    .any(|attr| {
+                let mut attributes: RootedVec<JS<Attr>> = RootedVec::new();
+                self.as_element().get_attributes(local_name, &mut attributes);
+                attributes.iter().map(|attr| attr.root()).any(|attr| {
                         // FIXME(https://github.com/rust-lang/rust/issues/23338)
                         let attr = attr.r();
                         let value = attr.value();
-                        test(value.as_slice())
+                        test(&value)
                     })
             }
         }
@@ -2580,7 +2523,7 @@ impl<'a> DisabledStateHelpers for JSRef<'a, Node> {
                           .map(|child| child.root())
                           .find(|child| child.r().is_htmllegendelement())
             {
-                Some(legend) => {
+                Some(ref legend) => {
                     // XXXabinader: should we save previous ancestor to avoid this iteration?
                     if self.ancestors().any(|ancestor| ancestor.root().r() == legend.r()) { continue; }
                 },
@@ -2594,7 +2537,7 @@ impl<'a> DisabledStateHelpers for JSRef<'a, Node> {
 
     fn check_parent_disabled_state_for_option(self) {
         if self.get_disabled_state() { return; }
-        if let Some(ref parent) = self.parent_node().root() {
+        if let Some(ref parent) = self.GetParentNode().root() {
             if parent.r().is_htmloptgroupelement() && parent.r().get_disabled_state() {
                 self.set_disabled_state(true);
                 self.set_enabled_state(false);

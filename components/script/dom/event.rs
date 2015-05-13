@@ -7,7 +7,7 @@ use dom::bindings::codegen::Bindings::EventBinding;
 use dom::bindings::codegen::Bindings::EventBinding::{EventConstants, EventMethods};
 use dom::bindings::error::Fallible;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{MutNullableJS, JSRef, Temporary};
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, Rootable, Temporary};
 use dom::bindings::utils::{Reflector, reflect_dom_object};
 use dom::eventtarget::{EventTarget, EventTargetHelpers};
 use util::str::DOMString;
@@ -19,7 +19,7 @@ use std::default::Default;
 use time;
 
 #[jstraceable]
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 #[repr(u16)]
 pub enum EventPhase {
     None      = EventConstants::NONE,
@@ -39,7 +39,8 @@ pub enum EventTypeId {
     ProgressEvent,
     StorageEvent,
     UIEvent,
-    ErrorEvent
+    ErrorEvent,
+    CloseEvent
 }
 
 #[derive(PartialEq)]
@@ -58,8 +59,8 @@ pub enum EventCancelable {
 pub struct Event {
     reflector_: Reflector,
     type_id: EventTypeId,
-    current_target: MutNullableJS<EventTarget>,
-    target: MutNullableJS<EventTarget>,
+    current_target: MutNullableHeap<JS<EventTarget>>,
+    target: MutNullableHeap<JS<EventTarget>>,
     type_: DOMRefCell<DOMString>,
     phase: Cell<EventPhase>,
     canceled: Cell<bool>,
@@ -124,17 +125,17 @@ impl Event {
 
     #[inline]
     pub fn clear_current_target(&self) {
-        self.current_target.clear();
+        self.current_target.set(None);
     }
 
     #[inline]
     pub fn set_current_target(&self, val: JSRef<EventTarget>) {
-        self.current_target.assign(Some(val));
+        self.current_target.set(Some(JS::from_rooted(val)));
     }
 
     #[inline]
     pub fn set_target(&self, val: JSRef<EventTarget>) {
-        self.target.assign(Some(val));
+        self.target.set(Some(JS::from_rooted(val)));
     }
 
     #[inline]
@@ -188,12 +189,12 @@ impl<'a> EventMethods for JSRef<'a, Event> {
 
     // https://dom.spec.whatwg.org/#dom-event-target
     fn GetTarget(self) -> Option<Temporary<EventTarget>> {
-        self.target.get()
+        self.target.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-event-currenttarget
     fn GetCurrentTarget(self) -> Option<Temporary<EventTarget>> {
-        self.current_target.get()
+        self.current_target.get().map(Temporary::from_rooted)
     }
 
     // https://dom.spec.whatwg.org/#dom-event-defaultprevented
@@ -248,7 +249,7 @@ impl<'a> EventMethods for JSRef<'a, Event> {
         self.stop_immediate.set(false);
         self.canceled.set(false);
         self.trusted.set(false);
-        self.target.clear();
+        self.target.set(None);
         *self.type_.borrow_mut() = type_;
         self.bubbles.set(bubbles);
         self.cancelable.set(cancelable);

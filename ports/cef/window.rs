@@ -10,8 +10,8 @@
 use eutil::Downcast;
 use interfaces::CefBrowser;
 use render_handler::CefRenderHandlerExtensions;
-use types::{cef_cursor_handle_t, cef_rect_t};
-use unicode::str::Utf16Encoder;
+use rustc_unicode::str::Utf16Encoder;
+use types::{cef_cursor_handle_t, cef_cursor_type_t, cef_rect_t};
 
 use compositing::compositor_task::{self, CompositorProxy, CompositorReceiver};
 use compositing::windowing::{WindowEvent, WindowMethods};
@@ -23,6 +23,7 @@ use layers::platform::surface::NativeGraphicsMetadata;
 use libc::{c_char, c_void};
 use msg::constellation_msg::{Key, KeyModifiers};
 use msg::compositor_msg::{ReadyState, PaintState};
+use std::ptr;
 use std_url::Url;
 use util::cursor::Cursor;
 use util::geometry::ScreenPx;
@@ -30,11 +31,17 @@ use std::cell::RefCell;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::mpsc::{Sender, channel};
+#[cfg(target_os="linux")]
+extern crate x11;
+#[cfg(target_os="linux")]
+use self::x11::xlib::XOpenDisplay;
 
 /// The type of an off-screen window.
 #[derive(Clone)]
 pub struct Window {
     cef_browser: RefCell<Option<CefBrowser>>,
+#[cfg(target_os="linux")]
+    display: *mut c_void,
 }
 
 #[cfg(target_os="macos")]
@@ -69,6 +76,16 @@ fn load_gl() {
 
 impl Window {
     /// Creates a new window.
+#[cfg(target_os="linux")]
+    pub fn new() -> Rc<Window> {
+        load_gl();
+
+        Rc::new(Window {
+            cef_browser: RefCell::new(None),
+            display: unsafe { XOpenDisplay(ptr::null()) as *mut c_void },
+        })
+    }
+#[cfg(not(target_os="linux"))]
     pub fn new() -> Rc<Window> {
         load_gl();
 
@@ -87,34 +104,64 @@ impl Window {
         WindowEvent::Idle
     }
 
+    fn cursor_type_for_cursor(&self, cursor: Cursor) -> cef_cursor_type_t {
+        match cursor {
+            Cursor::NoCursor => return cef_cursor_type_t::CT_NONE,
+            Cursor::ContextMenuCursor => return cef_cursor_type_t::CT_CONTEXTMENU,
+            Cursor::GrabbingCursor => return cef_cursor_type_t::CT_GRABBING,
+            Cursor::CrosshairCursor => return cef_cursor_type_t::CT_CROSS,
+            Cursor::CopyCursor => return cef_cursor_type_t::CT_COPY,
+            Cursor::AliasCursor => return cef_cursor_type_t::CT_ALIAS,
+            Cursor::TextCursor => return cef_cursor_type_t::CT_IBEAM,
+            Cursor::GrabCursor | Cursor::AllScrollCursor =>
+                return cef_cursor_type_t::CT_GRAB,
+            Cursor::NoDropCursor => return cef_cursor_type_t::CT_NODROP,
+            Cursor::NotAllowedCursor => return cef_cursor_type_t::CT_NOTALLOWED,
+            Cursor::PointerCursor => return cef_cursor_type_t::CT_POINTER,
+            Cursor::SResizeCursor => return cef_cursor_type_t::CT_SOUTHRESIZE,
+            Cursor::WResizeCursor => return cef_cursor_type_t::CT_WESTRESIZE,
+            Cursor::EwResizeCursor => return cef_cursor_type_t::CT_EASTWESTRESIZE,
+            Cursor::ColResizeCursor => return cef_cursor_type_t::CT_COLUMNRESIZE,
+            Cursor::EResizeCursor => return cef_cursor_type_t::CT_EASTRESIZE,
+            Cursor::NResizeCursor => return cef_cursor_type_t::CT_NORTHRESIZE,
+            Cursor::NsResizeCursor => return cef_cursor_type_t::CT_NORTHSOUTHRESIZE,
+            Cursor::RowResizeCursor => return cef_cursor_type_t::CT_ROWRESIZE,
+            Cursor::VerticalTextCursor => return cef_cursor_type_t::CT_VERTICALTEXT,
+            _ => return cef_cursor_type_t::CT_POINTER,
+        }
+    }
+
     /// Returns the Cocoa cursor for a CSS cursor. These match Firefox, except where Firefox
     /// bundles custom resources (which we don't yet do).
     #[cfg(target_os="macos")]
     fn cursor_handle_for_cursor(&self, cursor: Cursor) -> cef_cursor_handle_t {
-        use cocoa::base::{class, msg_send, selector};
+        use cocoa::base::class;
 
-        let cocoa_name = match cursor {
-            Cursor::NoCursor => return 0 as cef_cursor_handle_t,
-            Cursor::ContextMenuCursor => "contextualMenuCursor",
-            Cursor::GrabbingCursor => "closedHandCursor",
-            Cursor::CrosshairCursor => "crosshairCursor",
-            Cursor::CopyCursor => "dragCopyCursor",
-            Cursor::AliasCursor => "dragLinkCursor",
-            Cursor::TextCursor => "IBeamCursor",
-            Cursor::GrabCursor | Cursor::AllScrollCursor => "openHandCursor",
-            Cursor::NoDropCursor | Cursor::NotAllowedCursor => "operationNotAllowedCursor",
-            Cursor::PointerCursor => "pointingHandCursor",
-            Cursor::SResizeCursor => "resizeDownCursor",
-            Cursor::WResizeCursor => "resizeLeftCursor",
-            Cursor::EwResizeCursor | Cursor::ColResizeCursor => "resizeLeftRightCursor",
-            Cursor::EResizeCursor => "resizeRightCursor",
-            Cursor::NResizeCursor => "resizeUpCursor",
-            Cursor::NsResizeCursor | Cursor::RowResizeCursor => "resizeUpDownCursor",
-            Cursor::VerticalTextCursor => "IBeamCursorForVerticalLayout",
-            _ => "arrowCursor",
-        };
         unsafe {
-            msg_send()(class("NSCursor"), selector(cocoa_name))
+            match cursor {
+                Cursor::NoCursor => return 0 as cef_cursor_handle_t,
+                Cursor::ContextMenuCursor => msg_send![class("NSCursor"), contextualMenuCursor],
+                Cursor::GrabbingCursor => msg_send![class("NSCursor"), closedHandCursor],
+                Cursor::CrosshairCursor => msg_send![class("NSCursor"), crosshairCursor],
+                Cursor::CopyCursor => msg_send![class("NSCursor"), dragCopyCursor],
+                Cursor::AliasCursor => msg_send![class("NSCursor"), dragLinkCursor],
+                Cursor::TextCursor => msg_send![class("NSCursor"), IBeamCursor],
+                Cursor::GrabCursor | Cursor::AllScrollCursor =>
+                    msg_send![class("NSCursor"), openHandCursor],
+                Cursor::NoDropCursor | Cursor::NotAllowedCursor => 
+                    msg_send![class("NSCursor"), operationNotAllowedCursor],
+                Cursor::PointerCursor => msg_send![class("NSCursor"), pointingHandCursor],
+                Cursor::SResizeCursor => msg_send![class("NSCursor"), resizeDownCursor],
+                Cursor::WResizeCursor => msg_send![class("NSCursor"), resizeLeftCursor],
+                Cursor::EwResizeCursor | Cursor::ColResizeCursor => 
+                    msg_send![class("NSCursor"), resizeLeftRightCursor],
+                Cursor::EResizeCursor => msg_send![class("NSCursor"), resizeRightCursor],
+                Cursor::NResizeCursor => msg_send![class("NSCursor"), resizeUpCursor],
+                Cursor::NsResizeCursor | Cursor::RowResizeCursor => 
+                    msg_send![class("NSCursor"), resizeUpDownCursor],
+                Cursor::VerticalTextCursor => msg_send![class("NSCursor"), IBeamCursorForVerticalLayout],
+                _ => msg_send![class("NSCursor"), arrowCursor],
+            }
         }
     }
 
@@ -219,15 +266,9 @@ impl WindowMethods for Window {
 
     #[cfg(target_os="linux")]
     fn native_metadata(&self) -> NativeGraphicsMetadata {
-        extern {
-            fn cef_get_xdisplay() -> *mut c_void;
-        }
-
-        unsafe {
-            NativeGraphicsMetadata {
-                display: cef_get_xdisplay()
-            }
-        }
+       NativeGraphicsMetadata {
+           display: self.display,
+       }
     }
 
     fn create_compositor_channel(_: &Option<Rc<Window>>)
@@ -304,15 +345,18 @@ impl WindowMethods for Window {
     }
 
     fn set_cursor(&self, cursor: Cursor) {
+        use types::{CefCursorInfo,cef_point_t,cef_size_t};
         let browser = self.cef_browser.borrow();
         match *browser {
             None => {}
             Some(ref browser) => {
                 let cursor_handle = self.cursor_handle_for_cursor(cursor);
+                let info = CefCursorInfo { hotspot: cef_point_t {x: 0, y: 0}, image_scale_factor: 0.0, buffer: 0 as *mut isize, size: cef_size_t { width: 0, height: 0 } };
                 browser.get_host()
                        .get_client()
                        .get_render_handler()
-                       .on_cursor_change(browser.clone(), cursor_handle)
+                       .on_cursor_change(browser.clone(), cursor_handle,
+                         self.cursor_type_for_cursor(cursor), &info)
             }
         }
     }
@@ -325,9 +369,10 @@ struct CefCompositorProxy {
 impl CompositorProxy for CefCompositorProxy {
     #[cfg(target_os="macos")]
     fn send(&mut self, msg: compositor_task::Msg) {
-        use cocoa::appkit::{NSApp, NSApplication, NSApplicationDefined, NSAutoreleasePool};
-        use cocoa::appkit::{NSEvent, NSEventModifierFlags, NSEventSubtype, NSPoint};
+        use cocoa::appkit::{NSApp, NSApplication, NSApplicationDefined};
+        use cocoa::appkit::{NSEvent, NSEventModifierFlags, NSEventSubtype};
         use cocoa::base::nil;
+        use cocoa::foundation::{NSAutoreleasePool, NSPoint};
 
         // Send a message and kick the OS event loop awake.
         self.sender.send(msg).unwrap();
@@ -342,7 +387,7 @@ impl CompositorProxy for CefCompositorProxy {
                 NSEventModifierFlags::empty(),
                 0.0,
                 0,
-                0,
+                nil,
                 NSEventSubtype::NSWindowExposedEventType,
                 0,
                 0);

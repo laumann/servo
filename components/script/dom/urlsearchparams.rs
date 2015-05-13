@@ -9,7 +9,7 @@ use dom::bindings::codegen::UnionTypes::StringOrURLSearchParams;
 use dom::bindings::codegen::UnionTypes::StringOrURLSearchParams::{eURLSearchParams, eString};
 use dom::bindings::error::{Fallible};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JSRef, Temporary};
+use dom::bindings::js::{JSRef, Rootable, Temporary};
 use dom::bindings::utils::{Reflector, reflect_dom_object};
 
 use util::str::DOMString;
@@ -106,6 +106,11 @@ impl<'a> URLSearchParamsMethods for JSRef<'a, URLSearchParams> {
         self.data.borrow_mut().insert(name, vec!(value));
         self.update_steps();
     }
+
+    // https://url.spec.whatwg.org/#stringification-behavior
+    fn Stringifier(self) -> DOMString {
+        DOMString::from_utf8(self.serialize(None)).unwrap()
+    }
 }
 
 pub trait URLSearchParamsHelpers {
@@ -116,10 +121,9 @@ pub trait URLSearchParamsHelpers {
 impl URLSearchParamsHelpers for URLSearchParams {
     fn serialize(&self, encoding: Option<EncodingRef>) -> Vec<u8> {
         // https://url.spec.whatwg.org/#concept-urlencoded-serializer
-        fn serialize_string(value: &DOMString, encoding: EncodingRef) -> Vec<u8> {
+        fn serialize_string(value: &str, encoding: EncodingRef) -> Vec<u8> {
             // https://url.spec.whatwg.org/#concept-urlencoded-byte-serializer
 
-            let value = value.as_slice();
             // XXXManishearth should this be a strict encoding? Can unwrap()ing the result fail?
             let value = encoding.encode(value, EncoderTrap::Replace).unwrap();
 

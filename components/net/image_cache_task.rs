@@ -233,7 +233,7 @@ impl ImageCache {
             ResponseAction::HeadersAvailable(_) => {}
             ResponseAction::DataAvailable(data) => {
                 let pending_load = self.pending_loads.get_mut(&msg.url).unwrap();
-                pending_load.bytes.push_all(data.as_slice());
+                pending_load.bytes.push_all(&data);
             }
             ResponseAction::ResponseComplete(result) => {
                 match result {
@@ -246,7 +246,7 @@ impl ImageCache {
                         let sender = self.decoder_sender.clone();
 
                         self.task_pool.execute(move || {
-                            let image = load_from_memory(bytes.as_slice());
+                            let image = load_from_memory(&bytes);
                             let msg = DecoderMsg {
                                 url: url,
                                 image: image
@@ -306,7 +306,7 @@ impl ImageCache {
                         pending_load.add_listener(image_listener);
                         e.insert(pending_load);
 
-                        let load_data = LoadData::new(url.clone());
+                        let load_data = LoadData::new(url.clone(), None);
                         let listener = box ResourceListener {
                             url: url,
                             sender: self.progress_sender.clone(),
@@ -329,16 +329,22 @@ pub fn new_image_cache_task(resource_task: ResourceTask) -> ImageCacheTask {
 
         // Preload the placeholder image, used when images fail to load.
         let mut placeholder_url = resources_dir_path();
-        // TODO (Savago): replace for a prettier one.
         placeholder_url.push("rippy.jpg");
-        let url = Url::from_file_path(&*placeholder_url).unwrap();
-        let placeholder_image = match load_whole_resource(&resource_task, url) {
-            Err(..) => {
-                debug!("image_cache_task: failed loading the placeholder.");
-                None
+        let placeholder_image = match Url::from_file_path(&*placeholder_url) {
+            Ok(url) => {
+                match load_whole_resource(&resource_task, url) {
+                    Err(..) => {
+                        debug!("image_cache_task: failed loading the placeholder.");
+                        None
+                    }
+                    Ok((_, image_data)) => {
+                        Some(Arc::new(load_from_memory(&image_data).unwrap()))
+                    }
+                }
             }
-            Ok((_, image_data)) => {
-                Some(Arc::new(load_from_memory(&image_data).unwrap()))
+            Err(..) => {
+                debug!("image_cache_task: url {}", placeholder_url.display());
+                None
             }
         };
 

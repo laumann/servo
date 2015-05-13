@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "android")]
 pub fn resources_dir_path() -> PathBuf {
-    PathBuf::new("/sdcard/servo/")
+    PathBuf::from("/sdcard/servo/")
 }
 
 #[cfg(not(target_os = "android"))]
@@ -18,21 +18,30 @@ pub fn resources_dir_path() -> PathBuf {
     use std::fs::PathExt;
 
     match opts::get().resources_path {
-        Some(ref path) => PathBuf::new(path),
+        Some(ref path) => PathBuf::from(path),
         None => {
             // FIXME: Find a way to not rely on the executable being
             // under `<servo source>/components/servo/target`
             // or `<servo source>/components/servo/target/release`.
             let mut path = env::current_exe().ok().expect("can't get exe path");
             path.pop();
-            path.pop();
-            path.pop();
-            path.pop();
             path.push("resources");
-            if !path.is_dir() {  // self_exe_path() is probably in .../target/release
+            if !path.is_dir() {   // resources dir not in same dir as exe?
+                path.pop();
+                path.pop();
                 path.pop();
                 path.pop();
                 path.push("resources");
+                if !path.is_dir() {  // self_exe_path() is probably in .../target/release
+                    path.pop();
+                    path.pop();
+                    path.push("resources");
+                    if !path.is_dir() { // self_exe_path() is probably in .../target/release
+                        path.pop();
+                        path.pop();
+                        path.push("resources");
+                    }
+                }
             }
             path
         }

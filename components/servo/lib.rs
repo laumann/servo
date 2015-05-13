@@ -16,8 +16,7 @@
 //
 // The `Browser` is fed events from a generic type that implements the
 // `WindowMethods` trait.
-#![feature(libc, thread_local)]
-#![cfg_attr(not(test), feature(path))]
+#![feature(thread_local)]
 
 extern crate compositing;
 extern crate devtools;
@@ -26,13 +25,13 @@ extern crate net;
 extern crate net_traits;
 extern crate msg;
 extern crate profile;
+extern crate profile_traits;
 #[macro_use]
 extern crate util;
 extern crate script;
 extern crate layout;
 extern crate gfx;
 extern crate libc;
-extern crate url;
 extern crate webdriver_server;
 
 use compositing::CompositorEventListener;
@@ -52,8 +51,10 @@ use net::resource_task::new_resource_task;
 use net_traits::storage_task::StorageTask;
 
 use gfx::font_cache_task::FontCacheTask;
-use profile::mem;
-use profile::time;
+use profile::mem as profile_mem;
+use profile::time as profile_time;
+use profile_traits::mem;
+use profile_traits::time;
 use util::opts;
 
 use std::rc::Rc;
@@ -77,8 +78,6 @@ pub struct Browser {
 impl Browser  {
     pub fn new<Window>(window: Option<Rc<Window>>) -> Browser
     where Window: WindowMethods + 'static {
-        ::util::opts::set_experimental_enabled(opts::get().enable_experimental);
-
         // Global configuration options, parsed from the command line.
         let opts = opts::get();
 
@@ -92,8 +91,8 @@ impl Browser  {
         // to deliver the message.
         let (compositor_proxy, compositor_receiver) =
             WindowMethods::create_compositor_channel(&window);
-        let time_profiler_chan = time::Profiler::create(opts.time_profiler_period);
-        let mem_profiler_chan = mem::Profiler::create(opts.mem_profiler_period);
+        let time_profiler_chan = profile_time::Profiler::create(opts.time_profiler_period);
+        let mem_profiler_chan = profile_mem::Profiler::create(opts.mem_profiler_period);
         let devtools_chan = opts.devtools_port.map(|port| {
             devtools::start_server(port)
         });
@@ -145,15 +144,13 @@ impl Browser  {
         self.compositor.shutdown();
     }
 }
+
 fn create_constellation(opts: opts::Opts,
                         compositor_proxy: Box<CompositorProxy+Send>,
                         time_profiler_chan: time::ProfilerChan,
                         devtools_chan: Option<Sender<devtools_traits::DevtoolsControlMsg>>,
                         mem_profiler_chan: mem::ProfilerChan) -> ConstellationChan {
-    use std::env;
-
-    // Create a Servo instance.
-    let resource_task = new_resource_task(opts.user_agent.clone());
+    let resource_task = new_resource_task(opts.user_agent.clone(), devtools_chan.clone());
 
     let image_cache_task = new_image_cache_task(resource_task.clone());
     let font_cache_task = FontCacheTask::new(resource_task.clone());
@@ -171,17 +168,9 @@ fn create_constellation(opts: opts::Opts,
         storage_task);
 
     // Send the URL command to the constellation.
-    let cwd = env::current_dir().unwrap();
-    let url = match url::Url::parse(&opts.url) {
-        Ok(url) => url,
-        Err(url::ParseError::RelativeUrlWithoutBase)
-        => url::Url::from_file_path(&*cwd.join(&opts.url)).unwrap(),
-        Err(_) => panic!("URL parsing failed"),
-    };
-
     {
         let ConstellationChan(ref chan) = constellation_chan;
-        chan.send(ConstellationMsg::InitLoadUrl(url)).unwrap();
+        chan.send(ConstellationMsg::InitLoadUrl(opts.url.clone())).unwrap();
     }
 
     constellation_chan

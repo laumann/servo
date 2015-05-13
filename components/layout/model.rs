@@ -19,7 +19,7 @@ use util::geometry::Au;
 use util::logical_geometry::LogicalMargin;
 
 /// A collapsible margin. See CSS 2.1 § 8.3.1.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct AdjoiningMargins {
     /// The value of the greatest positive margin.
     pub most_positive: Au,
@@ -62,7 +62,7 @@ impl AdjoiningMargins {
 }
 
 /// Represents the block-start and block-end margins of a flow with collapsible margins. See CSS 2.1 § 8.3.1.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub enum CollapsibleMargins {
     /// Margins may not collapse with this flow.
     None(Au, Au),
@@ -260,7 +260,7 @@ impl MarginCollapseInfo {
     }
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub enum MarginCollapseState {
     AccumulatingCollapsibleTopMargin,
     AccumulatingMarginIn,
@@ -357,7 +357,7 @@ impl IntrinsicISizesContribution {
 }
 
 /// Useful helper data type when computing values for blocks and positioned elements.
-#[derive(Copy, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum MaybeAuto {
     Auto,
     Specified(Au),
@@ -434,8 +434,8 @@ impl ToGfxMatrix for ComputedMatrix {
                       self.m12 as f32,
                       self.m21 as f32,
                       self.m22 as f32,
-                      self.m31.to_au(containing_size.width).to_subpx() as f32,
-                      self.m32.to_au(containing_size.height).to_subpx() as f32)
+                      self.m31.to_au(containing_size.width).to_f32_px(),
+                      self.m32.to_au(containing_size.height).to_f32_px())
     }
 }
 
@@ -446,7 +446,7 @@ trait ToAu {
 impl ToAu for LengthAndPercentage {
     #[inline]
     fn to_au(&self, containing_size: Au) -> Au {
-        self.length + Au::from_frac_px(self.percentage * containing_size.to_subpx())
+        self.length + Au::from_f32_px(self.percentage * containing_size.to_f32_px())
     }
 }
 

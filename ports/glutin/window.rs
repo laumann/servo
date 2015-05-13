@@ -33,8 +33,6 @@ use msg::constellation_msg::{KeyState, CONTROL, SHIFT, ALT};
 #[cfg(feature = "window")]
 use std::cell::{Cell, RefCell};
 #[cfg(feature = "window")]
-use std::num::Float;
-#[cfg(feature = "window")]
 use util::opts;
 
 #[cfg(all(feature = "headless", target_os="linux"))]
@@ -151,17 +149,19 @@ impl Window {
                         (_, VirtualKeyCode::LAlt) => self.toggle_modifier(LEFT_ALT),
                         (_, VirtualKeyCode::RAlt) => self.toggle_modifier(RIGHT_ALT),
                         (ElementState::Pressed, VirtualKeyCode::Escape) => return true,
-                        (ElementState::Pressed, key_code) => {
+                        (_, key_code) => {
                             match Window::glutin_key_to_script_key(key_code) {
                                 Ok(key) => {
-                                    let state = KeyState::Pressed;
+                                    let state = match element_state {
+                                        ElementState::Pressed => KeyState::Pressed,
+                                        ElementState::Released => KeyState::Released,
+                                    };
                                     let modifiers = Window::glutin_mods_to_script_mods(self.key_modifiers.get());
                                     self.event_queue.borrow_mut().push(WindowEvent::KeyEvent(key, state, modifiers));
                                 }
                                 _ => {}
                             }
                         }
-                        (_, _) => {}
                     }
                 }
             }
@@ -235,21 +235,22 @@ impl Window {
                 MouseWindowEvent::MouseDown(MouseButton::Left, TypedPoint2D(x as f32, y as f32))
             }
             ElementState::Released => {
+                let mouse_up_event = MouseWindowEvent::MouseUp(MouseButton::Left, TypedPoint2D(x as f32, y as f32));
                 match self.mouse_down_button.get() {
-                    None => (),
+                    None => mouse_up_event,
                     Some(but) if button == but => {
                         let pixel_dist = self.mouse_down_point.get() - Point2D(x, y);
                         let pixel_dist = ((pixel_dist.x * pixel_dist.x +
                                            pixel_dist.y * pixel_dist.y) as f64).sqrt();
                         if pixel_dist < max_pixel_dist {
-                            let click_event = MouseWindowEvent::Click(
-                                MouseButton::Left, TypedPoint2D(x as f32, y as f32));
-                            self.event_queue.borrow_mut().push(WindowEvent::MouseWindowEventClass(click_event));
+                            self.event_queue.borrow_mut().push(WindowEvent::MouseWindowEventClass(mouse_up_event));
+                            MouseWindowEvent::Click(MouseButton::Left, TypedPoint2D(x as f32, y as f32))
+                        } else {
+                            mouse_up_event
                         }
-                    }
-                    Some(_) => (),
+                    },
+                    Some(_) => mouse_up_event,
                 }
-                MouseWindowEvent::MouseUp(MouseButton::Left, TypedPoint2D(x as f32, y as f32))
             }
         };
         self.event_queue.borrow_mut().push(WindowEvent::MouseWindowEventClass(event));
@@ -263,8 +264,7 @@ impl Window {
 
     #[cfg(target_os="linux")]
     fn handle_next_event(&self) -> bool {
-        use std::old_io::timer::sleep;
-        use std::time::duration::Duration;
+        use std::thread::sleep_ms;
 
         // TODO(gw): This is an awful hack to work around the
         // broken way we currently call X11 from multiple threads.
@@ -288,7 +288,7 @@ impl Window {
                 self.handle_window_event(event)
             }
             None => {
-                sleep(Duration::milliseconds(16));
+                sleep_ms(16);
                 false
             }
         }
@@ -738,42 +738,42 @@ impl CompositorProxy for GlutinCompositorProxy {
 
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn glBindVertexArrayOES(_array: uint)
+pub extern "C" fn glBindVertexArrayOES(_array: usize)
 {
     unimplemented!()
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn glDeleteVertexArraysOES(_n: int, _arrays: *const ())
+pub extern "C" fn glDeleteVertexArraysOES(_n: isize, _arrays: *const ())
 {
     unimplemented!()
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn glGenVertexArraysOES(_n: int, _arrays: *const ())
+pub extern "C" fn glGenVertexArraysOES(_n: isize, _arrays: *const ())
 {
     unimplemented!()
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn glRenderbufferStorageMultisampleIMG(_: int, _: int, _: int, _: int, _: int)
+pub extern "C" fn glRenderbufferStorageMultisampleIMG(_: isize, _: isize, _: isize, _: isize, _: isize)
 {
     unimplemented!()
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn glFramebufferTexture2DMultisampleIMG(_: int, _: int, _: int, _: int, _: int, _: int)
+pub extern "C" fn glFramebufferTexture2DMultisampleIMG(_: isize, _: isize, _: isize, _: isize, _: isize, _: isize)
 {
     unimplemented!()
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn glDiscardFramebufferEXT(_: int, _: int, _: *const ())
+pub extern "C" fn glDiscardFramebufferEXT(_: isize, _: isize, _: *const ())
 {
     unimplemented!()
 }

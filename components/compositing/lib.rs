@@ -4,8 +4,6 @@
 
 #![feature(box_syntax)]
 #![feature(core)]
-#![feature(io)]
-#![feature(old_io)]
 #![feature(rustc_private)]
 #![feature(std_misc)]
 
@@ -22,8 +20,10 @@ extern crate png;
 extern crate script_traits;
 extern crate msg;
 extern crate net;
-extern crate profile;
+extern crate num;
+extern crate profile_traits;
 extern crate net_traits;
+extern crate style;
 #[macro_use]
 extern crate util;
 extern crate gleam;

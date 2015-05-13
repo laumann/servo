@@ -4,26 +4,27 @@
 
 #![feature(box_syntax)]
 #![feature(collections)]
-#![feature(core)]
 #![feature(rustc_private)]
+#![feature(slice_patterns)]
+#![feature(step_by)]
 
 extern crate geom;
 extern crate hyper;
 #[macro_use]
 extern crate log;
 extern crate png;
-extern crate profile;
 extern crate stb_image;
 extern crate url;
 extern crate util;
+extern crate msg;
 
 use hyper::header::{ContentType, Headers};
 use hyper::http::RawStatus;
 use hyper::method::Method;
 use hyper::mime::{Mime, Attr};
+use msg::constellation_msg::{PipelineId};
 use url::Url;
 
-use std::borrow::IntoCow;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 pub mod image_cache_task;
@@ -48,10 +49,11 @@ pub struct LoadData {
     pub preserved_headers: Headers,
     pub data: Option<Vec<u8>>,
     pub cors: Option<ResourceCORSData>,
+    pub pipeline_id: Option<PipelineId>,
 }
 
 impl LoadData {
-    pub fn new(url: Url) -> LoadData {
+    pub fn new(url: Url, id: Option<PipelineId>) -> LoadData {
         LoadData {
             url: url,
             method: Method::Get,
@@ -59,6 +61,7 @@ impl LoadData {
             preserved_headers: Headers::new(),
             data: None,
             cors: None,
+            pipeline_id: id,
         }
     }
 }
@@ -122,6 +125,58 @@ pub enum ControlMsg {
     Exit
 }
 
+/// Initialized but unsent request. Encapsulates everything necessary to instruct
+/// the resource task to make a new request. The `load` method *must* be called before
+/// destruction or the task will panic.
+pub struct PendingAsyncLoad {
+    resource_task: ResourceTask,
+    url: Url,
+    pipeline: Option<PipelineId>,
+    input_sender: Sender<LoadResponse>,
+    input_receiver: Receiver<LoadResponse>,
+    guard: PendingLoadGuard,
+}
+
+struct PendingLoadGuard {
+    loaded: bool,
+}
+
+impl PendingLoadGuard {
+    fn neuter(&mut self) {
+        self.loaded = true;
+    }
+}
+
+impl Drop for PendingLoadGuard {
+    fn drop(&mut self) {
+        assert!(self.loaded)
+    }
+}
+
+impl PendingAsyncLoad {
+    pub fn new(resource_task: ResourceTask, url: Url, pipeline: Option<PipelineId>)
+               -> PendingAsyncLoad {
+        let (sender, receiver) = channel();
+        PendingAsyncLoad {
+            resource_task: resource_task,
+            url: url,
+            pipeline: pipeline,
+            input_sender: sender,
+            input_receiver: receiver,
+            guard: PendingLoadGuard { loaded: false, },
+        }
+    }
+
+    /// Initiate the network request associated with this pending load.
+    pub fn load(mut self) -> Receiver<LoadResponse> {
+        self.guard.neuter();
+        let load_data = LoadData::new(self.url, self.pipeline);
+        let consumer = LoadConsumer::Channel(self.input_sender);
+        self.resource_task.send(ControlMsg::Load(load_data, consumer)).unwrap();
+        self.input_receiver
+    }
+}
+
 /// Message sent in response to `Load`.  Contains metadata, and a port
 /// for receiving the data.
 ///
@@ -170,7 +225,7 @@ impl Metadata {
             charset:      None,
             headers: None,
             // https://fetch.spec.whatwg.org/#concept-response-status-message
-            status: Some(RawStatus(200, "OK".into_cow())),
+            status: Some(RawStatus(200, "OK".into())),
         }
     }
 
@@ -192,7 +247,7 @@ impl Metadata {
 }
 
 /// The creator of a given cookie
-#[derive(PartialEq, Copy)]
+#[derive(PartialEq, Copy, Clone)]
 pub enum CookieSource {
     /// An HTTP API
     HTTP,
@@ -213,7 +268,7 @@ pub enum ProgressMsg {
 pub fn load_whole_resource(resource_task: &ResourceTask, url: Url)
         -> Result<(Metadata, Vec<u8>), String> {
     let (start_chan, start_port) = channel();
-    resource_task.send(ControlMsg::Load(LoadData::new(url), LoadConsumer::Channel(start_chan))).unwrap();
+    resource_task.send(ControlMsg::Load(LoadData::new(url, None), LoadConsumer::Channel(start_chan))).unwrap();
     let response = start_port.recv().unwrap();
 
     let mut buf = vec!();
@@ -227,10 +282,8 @@ pub fn load_whole_resource(resource_task: &ResourceTask, url: Url)
 }
 
 /// Load a URL asynchronously and iterate over chunks of bytes from the response.
-pub fn load_bytes_iter(resource_task: &ResourceTask, url: Url) -> (Metadata, ProgressMsgPortIterator) {
-    let (input_chan, input_port) = channel();
-    resource_task.send(ControlMsg::Load(LoadData::new(url), LoadConsumer::Channel(input_chan))).unwrap();
-
+pub fn load_bytes_iter(pending: PendingAsyncLoad) -> (Metadata, ProgressMsgPortIterator) {
+    let input_port = pending.load();
     let response = input_port.recv().unwrap();
     let iter = ProgressMsgPortIterator { progress_port: response.progress_port };
     (response.metadata, iter)

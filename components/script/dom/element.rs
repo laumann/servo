@@ -23,12 +23,14 @@ use dom::bindings::codegen::InheritTypes::{HTMLTableElementDerived, HTMLTableCel
 use dom::bindings::codegen::InheritTypes::{HTMLTableRowElementDerived, HTMLTextAreaElementDerived};
 use dom::bindings::codegen::InheritTypes::{HTMLTableSectionElementDerived, NodeCast};
 use dom::bindings::codegen::InheritTypes::HTMLAnchorElementCast;
+use dom::bindings::codegen::InheritTypes::HTMLTableDataCellElementDerived;
 use dom::bindings::codegen::UnionTypes::NodeOrString;
 use dom::bindings::error::{ErrorResult, Fallible};
 use dom::bindings::error::Error::{InvalidCharacter, Syntax};
 use dom::bindings::error::Error::NoModificationAllowed;
-use dom::bindings::js::{MutNullableJS, JS, JSRef, LayoutJS, Temporary, TemporaryPushable};
-use dom::bindings::js::{OptionalRootable, RootedReference};
+use dom::bindings::js::{JS, JSRef, LayoutJS, MutNullableHeap};
+use dom::bindings::js::{OptionalRootable, Rootable, RootedReference};
+use dom::bindings::js::{Temporary, TemporaryPushable};
 use dom::bindings::trace::RootedVec;
 use dom::bindings::utils::{xml_name_type, validate_and_extract};
 use dom::bindings::utils::XMLName::InvalidXMLName;
@@ -54,31 +56,37 @@ use dom::node::{document_from_node, NodeDamage};
 use dom::node::{window_from_node};
 use dom::nodelist::NodeList;
 use dom::virtualmethods::{VirtualMethods, vtable_for};
+
 use devtools_traits::AttrInfo;
-use style::legacy::{SimpleColorAttribute, UnsignedIntegerAttribute, IntegerAttribute, LengthAttribute};
-use selectors::matching::matches;
-use style::properties::{PropertyDeclarationBlock, PropertyDeclaration, parse_style_attribute};
-use selectors::parser::parse_author_origin_selector_list_from_str;
 use style;
+use style::legacy::{UnsignedIntegerAttribute, from_declaration};
+use style::properties::{PropertyDeclarationBlock, PropertyDeclaration, parse_style_attribute};
+use style::properties::DeclaredValue::SpecifiedValue;
+use style::properties::longhands::{self, border_spacing};
+use style::values::CSSFloat;
+use style::values::specified::{self, CSSColor};
+use util::geometry::Au;
 use util::namespace;
+use util::smallvec::VecLike;
 use util::str::{DOMString, LengthOrPercentageOrAuto};
 
+use cssparser::Color;
 use html5ever::serialize;
 use html5ever::serialize::SerializeOpts;
 use html5ever::serialize::TraversalScope;
 use html5ever::serialize::TraversalScope::{IncludeNode, ChildrenOnly};
 use html5ever::tree_builder::{NoQuirks, LimitedQuirks, Quirks};
+use selectors::matching::{matches, DeclarationBlock};
+use selectors::parser::parse_author_origin_selector_list_from_str;
+use string_cache::{Atom, Namespace, QualName};
+use url::UrlParser;
 
-use cssparser::RGBA;
 use std::ascii::AsciiExt;
-use std::borrow::{IntoCow, ToOwned};
+use std::borrow::{Cow, ToOwned};
 use std::cell::{Ref, RefMut};
 use std::default::Default;
 use std::mem;
-use std::old_io::{MemWriter, Writer};
 use std::sync::Arc;
-use string_cache::{Atom, Namespace, QualName};
-use url::UrlParser;
 
 #[dom_struct]
 pub struct Element {
@@ -88,8 +96,8 @@ pub struct Element {
     prefix: Option<DOMString>,
     attrs: DOMRefCell<Vec<JS<Attr>>>,
     style_attribute: DOMRefCell<Option<PropertyDeclarationBlock>>,
-    attr_list: MutNullableJS<NamedNodeMap>,
-    class_list: MutNullableJS<DOMTokenList>,
+    attr_list: MutNullableHeap<JS<NamedNodeMap>>,
+    class_list: MutNullableHeap<JS<DOMTokenList>>,
 }
 
 impl ElementDerived for EventTarget {
@@ -102,7 +110,7 @@ impl ElementDerived for EventTarget {
     }
 }
 
-#[derive(Copy, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 #[jstraceable]
 pub enum ElementTypeId {
     HTMLElement(HTMLElementTypeId),
@@ -119,7 +127,7 @@ pub enum ElementCreator {
 // Element methods
 //
 impl Element {
-    pub fn create(name: QualName, prefix: Option<DOMString>,
+    pub fn create(name: QualName, prefix: Option<Atom>,
                   document: JSRef<Document>, creator: ElementCreator)
                   -> Temporary<Element> {
         create_element(name, prefix, document, creator)
@@ -148,22 +156,22 @@ impl Element {
 
 #[allow(unsafe_code)]
 pub trait RawLayoutElementHelpers {
+    unsafe fn get_attr_for_layout<'a>(&'a self, namespace: &Namespace, name: &Atom)
+                                      -> Option<&'a AttrValue>;
     unsafe fn get_attr_val_for_layout<'a>(&'a self, namespace: &Namespace, name: &Atom)
                                       -> Option<&'a str>;
     unsafe fn get_attr_vals_for_layout<'a>(&'a self, name: &Atom) -> Vec<&'a str>;
     unsafe fn get_attr_atom_for_layout(&self, namespace: &Namespace, name: &Atom) -> Option<Atom>;
     unsafe fn has_class_for_layout(&self, name: &Atom) -> bool;
     unsafe fn get_classes_for_layout(&self) -> Option<&'static [Atom]>;
-    unsafe fn get_length_attribute_for_layout(&self, length_attribute: LengthAttribute)
-                                              -> LengthOrPercentageOrAuto;
-    unsafe fn get_integer_attribute_for_layout(&self, integer_attribute: IntegerAttribute)
-                                               -> Option<i32>;
+
+    unsafe fn synthesize_presentational_hints_for_legacy_attributes<V>(&self, &mut V)
+        where V: VecLike<DeclarationBlock<Vec<PropertyDeclaration>>>;
     unsafe fn get_checked_state_for_layout(&self) -> bool;
     unsafe fn get_indeterminate_state_for_layout(&self) -> bool;
     unsafe fn get_unsigned_integer_attribute_for_layout(&self, attribute: UnsignedIntegerAttribute)
                                                         -> Option<u32>;
-    unsafe fn get_simple_color_attribute_for_layout(&self, attribute: SimpleColorAttribute)
-                                                    -> Option<RGBA>;
+
     fn local_name<'a>(&'a self) -> &'a Atom;
     fn namespace<'a>(&'a self) -> &'a Namespace;
     fn style_attribute<'a>(&'a self) -> &'a DOMRefCell<Option<PropertyDeclarationBlock>>;
@@ -184,6 +192,13 @@ unsafe fn get_attr_for_layout(elem: &Element, namespace: &Namespace, name: &Atom
 #[allow(unsafe_code)]
 impl RawLayoutElementHelpers for Element {
     #[inline]
+    unsafe fn get_attr_for_layout<'a>(&'a self, namespace: &Namespace, name: &Atom)
+                                      -> Option<&'a AttrValue> {
+        get_attr_for_layout(self, namespace, name).map(|attr| {
+            (*attr.unsafe_get()).value_forever()
+        })
+    }
+
     unsafe fn get_attr_val_for_layout<'a>(&'a self, namespace: &Namespace, name: &Atom)
                                           -> Option<&'a str> {
         get_attr_for_layout(self, namespace, name).map(|attr| {
@@ -226,49 +241,171 @@ impl RawLayoutElementHelpers for Element {
         })
     }
 
-    #[inline]
-    unsafe fn get_length_attribute_for_layout(&self, length_attribute: LengthAttribute)
-                                              -> LengthOrPercentageOrAuto {
-        match length_attribute {
-            LengthAttribute::Width => {
-                if self.is_htmltableelement() {
-                    let this: &HTMLTableElement = mem::transmute(self);
-                    this.get_width()
-                } else if self.is_htmltablecellelement() {
-                    let this: &HTMLTableCellElement = mem::transmute(self);
-                    this.get_width()
-                } else {
-                    panic!("I'm not a table or table cell!")
+    unsafe fn synthesize_presentational_hints_for_legacy_attributes<V>(&self, hints: &mut V)
+        where V: VecLike<DeclarationBlock<Vec<PropertyDeclaration>>>
+    {
+        let bgcolor = if self.is_htmlbodyelement() {
+            let this: &HTMLBodyElement = mem::transmute(self);
+            this.get_background_color()
+        } else if self.is_htmltableelement() {
+            let this: &HTMLTableElement = mem::transmute(self);
+            this.get_background_color()
+        } else if self.is_htmltabledatacellelement() {
+            let this: &HTMLTableCellElement = mem::transmute(self);
+            this.get_background_color()
+        } else if self.is_htmltablerowelement() {
+            let this: &HTMLTableRowElement = mem::transmute(self);
+            this.get_background_color()
+        } else if self.is_htmltablesectionelement() {
+            let this: &HTMLTableSectionElement = mem::transmute(self);
+            this.get_background_color()
+        } else {
+            None
+        };
+
+        if let Some(color) = bgcolor {
+            hints.push(from_declaration(
+                PropertyDeclaration::BackgroundColor(SpecifiedValue(
+                    CSSColor { parsed: Color::RGBA(color), authored: None }))));
+        }
+
+
+        let cellspacing = if self.is_htmltableelement() {
+            let this: &HTMLTableElement = mem::transmute(self);
+            this.get_cellspacing()
+        } else {
+            None
+        };
+
+        if let Some(cellspacing) = cellspacing {
+            let width_value = specified::Length::Absolute(Au::from_px(cellspacing as i32));
+            hints.push(from_declaration(
+                PropertyDeclaration::BorderSpacing(SpecifiedValue(
+                    border_spacing::SpecifiedValue {
+                        horizontal: width_value,
+                        vertical: width_value,
+                    }))));
+        }
+
+
+        let size = if self.is_htmlinputelement() {
+            // FIXME(pcwalton): More use of atoms, please!
+            // FIXME(Ms2ger): this is nonsense! Invalid values also end up as
+            //                a text field
+            match self.get_attr_val_for_layout(&ns!(""), &atom!("type")) {
+                Some("text") | Some("password") => {
+                    let this: &HTMLInputElement = mem::transmute(self);
+                    match this.get_size_for_layout() {
+                        0 => None,
+                        s => Some(s as i32),
+                    }
                 }
+                _ => None
+            }
+        } else {
+            None
+        };
+
+        if let Some(size) = size {
+            let value = specified::Length::ServoCharacterWidth(
+                specified::CharacterWidth(size));
+            hints.push(from_declaration(
+                PropertyDeclaration::Width(SpecifiedValue(
+                    specified::LengthOrPercentageOrAuto::Length(value)))));
+        }
+
+
+        let width = if self.is_htmltableelement() {
+            let this: &HTMLTableElement = mem::transmute(self);
+            this.get_width()
+        } else if self.is_htmltabledatacellelement() {
+            let this: &HTMLTableCellElement = mem::transmute(self);
+            this.get_width()
+        } else {
+            LengthOrPercentageOrAuto::Auto
+        };
+
+        match width {
+            LengthOrPercentageOrAuto::Auto => {}
+            LengthOrPercentageOrAuto::Percentage(percentage) => {
+                let width_value = specified::LengthOrPercentageOrAuto::Percentage(percentage);
+                hints.push(from_declaration(
+                    PropertyDeclaration::Width(SpecifiedValue(width_value))));
+            }
+            LengthOrPercentageOrAuto::Length(length) => {
+                let width_value = specified::LengthOrPercentageOrAuto::Length(specified::Length::Absolute(length));
+                hints.push(from_declaration(
+                    PropertyDeclaration::Width(SpecifiedValue(width_value))));
             }
         }
-    }
 
-    #[inline]
-    unsafe fn get_integer_attribute_for_layout(&self, integer_attribute: IntegerAttribute)
-                                               -> Option<i32> {
-        match integer_attribute {
-            IntegerAttribute::Size => {
-                if !self.is_htmlinputelement() {
-                    panic!("I'm not a form input!")
-                }
-                let this: &HTMLInputElement = mem::transmute(self);
-                Some(this.get_size_for_layout() as i32)
+
+        let cols = if self.is_htmltextareaelement() {
+            let this: &HTMLTextAreaElement = mem::transmute(self);
+            match this.get_cols_for_layout() {
+                0 => None,
+                c => Some(c as i32),
             }
-            IntegerAttribute::Cols => {
-                if !self.is_htmltextareaelement() {
-                    panic!("I'm not a textarea element!")
-                }
-                let this: &HTMLTextAreaElement = mem::transmute(self);
-                Some(this.get_cols_for_layout() as i32)
+        } else {
+            None
+        };
+
+        if let Some(cols) = cols {
+            // TODO(mttr) ServoCharacterWidth uses the size math for <input type="text">, but
+            // the math for <textarea> is a little different since we need to take
+            // scrollbar size into consideration (but we don't have a scrollbar yet!)
+            //
+            // https://html.spec.whatwg.org/multipage/#textarea-effective-width
+            let value = specified::Length::ServoCharacterWidth(specified::CharacterWidth(cols));
+            hints.push(from_declaration(
+                PropertyDeclaration::Width(SpecifiedValue(
+                    specified::LengthOrPercentageOrAuto::Length(value)))));
+        }
+
+
+        let rows = if self.is_htmltextareaelement() {
+            let this: &HTMLTextAreaElement = mem::transmute(self);
+            match this.get_rows_for_layout() {
+                0 => None,
+                r => Some(r as i32),
             }
-            IntegerAttribute::Rows => {
-                if !self.is_htmltextareaelement() {
-                    panic!("I'm not a textarea element!")
-                }
-                let this: &HTMLTextAreaElement = mem::transmute(self);
-                Some(this.get_rows_for_layout() as i32)
-            }
+        } else {
+            None
+        };
+
+        if let Some(rows) = rows {
+            // TODO(mttr) This should take scrollbar size into consideration.
+            //
+            // https://html.spec.whatwg.org/multipage/#textarea-effective-height
+            let value = specified::Length::FontRelative(specified::FontRelativeLength::Em(rows as CSSFloat));
+            hints.push(from_declaration(
+                PropertyDeclaration::Height(SpecifiedValue(
+                    longhands::height::SpecifiedValue(
+                        specified::LengthOrPercentageOrAuto::Length(value))))));
+        }
+
+
+        let border = if self.is_htmltableelement() {
+            let this: &HTMLTableElement = mem::transmute(self);
+            this.get_border()
+        } else {
+            None
+        };
+
+        if let Some(border) = border {
+            let width_value = specified::Length::Absolute(Au::from_px(border as i32));
+            hints.push(from_declaration(
+                PropertyDeclaration::BorderTopWidth(SpecifiedValue(
+                    longhands::border_top_width::SpecifiedValue(width_value)))));
+            hints.push(from_declaration(
+                PropertyDeclaration::BorderLeftWidth(SpecifiedValue(
+                    longhands::border_left_width::SpecifiedValue(width_value)))));
+            hints.push(from_declaration(
+                PropertyDeclaration::BorderBottomWidth(SpecifiedValue(
+                    longhands::border_bottom_width::SpecifiedValue(width_value)))));
+            hints.push(from_declaration(
+                PropertyDeclaration::BorderRightWidth(SpecifiedValue(
+                    longhands::border_right_width::SpecifiedValue(width_value)))));
         }
     }
 
@@ -299,26 +436,6 @@ impl RawLayoutElementHelpers for Element {
                                                         attribute: UnsignedIntegerAttribute)
                                                         -> Option<u32> {
         match attribute {
-            UnsignedIntegerAttribute::Border => {
-                if self.is_htmltableelement() {
-                    let this: &HTMLTableElement = mem::transmute(self);
-                    this.get_border()
-                } else {
-                    // Don't panic since `:-servo-nonzero-border` can cause this to be called on
-                    // arbitrary elements.
-                    None
-                }
-            }
-            UnsignedIntegerAttribute::CellSpacing => {
-                if self.is_htmltableelement() {
-                    let this: &HTMLTableElement = mem::transmute(self);
-                    this.get_cellspacing()
-                } else {
-                    // Don't panic since `display` can cause this to be called on arbitrary
-                    // elements.
-                    None
-                }
-            }
             UnsignedIntegerAttribute::ColSpan => {
                 if self.is_htmltablecellelement() {
                     let this: &HTMLTableCellElement = mem::transmute(self);
@@ -326,34 +443,6 @@ impl RawLayoutElementHelpers for Element {
                 } else {
                     // Don't panic since `display` can cause this to be called on arbitrary
                     // elements.
-                    None
-                }
-            }
-        }
-    }
-
-    #[inline]
-    #[allow(unrooted_must_root)]
-    unsafe fn get_simple_color_attribute_for_layout(&self, attribute: SimpleColorAttribute)
-                                                    -> Option<RGBA> {
-        match attribute {
-            SimpleColorAttribute::BgColor => {
-                if self.is_htmlbodyelement() {
-                    let this: &HTMLBodyElement = mem::transmute(self);
-                    this.get_background_color()
-                } else if self.is_htmltableelement() {
-                    let this: &HTMLTableElement = mem::transmute(self);
-                    this.get_background_color()
-                } else if self.is_htmltablecellelement() {
-                    let this: &HTMLTableCellElement = mem::transmute(self);
-                    this.get_background_color()
-                } else if self.is_htmltablerowelement() {
-                    let this: &HTMLTableRowElement = mem::transmute(self);
-                    this.get_background_color()
-                } else if self.is_htmltablesectionelement() {
-                    let this: &HTMLTableSectionElement = mem::transmute(self);
-                    this.get_background_color()
-                } else {
                     None
                 }
             }
@@ -389,7 +478,7 @@ impl LayoutElementHelpers for LayoutJS<Element> {
         if (*self.unsafe_get()).namespace != ns!(HTML) {
             return false
         }
-        let node: LayoutJS<Node> = self.transmute_copy();
+        let node = NodeCast::from_layout_js(&self);
         node.owner_doc_for_layout().is_html_document_for_layout()
     }
 
@@ -477,7 +566,7 @@ impl<'a> ElementHelpers<'a> for JSRef<'a, Element> {
         if self.namespace != ns!(HTML) {
             return false
         }
-        match self.local_name.as_slice() {
+        match &*self.local_name {
             /* List of void elements from
             https://html.spec.whatwg.org/multipage/#html-fragment-serialisation-algorithm */
             "area" | "base" | "basefont" | "bgsound" | "br" | "col" | "embed" |
@@ -562,13 +651,13 @@ impl<'a> ElementHelpers<'a> for JSRef<'a, Element> {
 
     fn serialize(self, traversal_scope: TraversalScope) -> Fallible<DOMString> {
         let node: JSRef<Node> = NodeCast::from_ref(self);
-        let mut writer = MemWriter::new();
+        let mut writer = vec![];
         match serialize(&mut writer, &node,
                         SerializeOpts {
                             traversal_scope: traversal_scope,
                             .. Default::default()
                         }) {
-            Ok(()) => Ok(String::from_utf8(writer.into_inner()).unwrap()),
+            Ok(()) => Ok(String::from_utf8(writer).unwrap()),
             Err(_) => panic!("Cannot serialize element"),
         }
     }
@@ -664,17 +753,16 @@ pub trait AttributeHandlers {
     /// Returns the first attribute with any namespace and given case-sensitive
     /// name, if any.
     fn get_attribute_by_name(self, name: DOMString) -> Option<Temporary<Attr>>;
-    fn get_attributes(self, local_name: &Atom)
-                      -> Vec<Temporary<Attr>>;
+    fn get_attributes(self, local_name: &Atom, attributes: &mut RootedVec<JS<Attr>>);
     fn set_attribute_from_parser(self,
                                  name: QualName,
                                  value: DOMString,
-                                 prefix: Option<DOMString>);
+                                 prefix: Option<Atom>);
     fn set_attribute(self, name: &Atom, value: AttrValue);
     fn set_custom_attribute(self, name: DOMString, value: DOMString) -> ErrorResult;
     fn do_set_attribute<F>(self, local_name: Atom, value: AttrValue,
                            name: Atom, namespace: Namespace,
-                           prefix: Option<DOMString>, cb: F)
+                           prefix: Option<Atom>, cb: F)
         where F: Fn(JSRef<Attr>) -> bool;
     fn parse_attribute(self, namespace: &Namespace, local_name: &Atom,
                        value: DOMString) -> AttrValue;
@@ -703,15 +791,15 @@ pub trait AttributeHandlers {
     fn get_tokenlist_attribute(self, local_name: &Atom) -> Vec<Atom>;
     fn set_tokenlist_attribute(self, local_name: &Atom, value: DOMString);
     fn set_atomic_tokenlist_attribute(self, local_name: &Atom, tokens: Vec<Atom>);
-    fn get_uint_attribute(self, local_name: &Atom) -> u32;
+    fn get_uint_attribute(self, local_name: &Atom, default: u32) -> u32;
     fn set_uint_attribute(self, local_name: &Atom, value: u32);
 }
 
 impl<'a> AttributeHandlers for JSRef<'a, Element> {
     fn get_attribute(self, namespace: &Namespace, local_name: &Atom) -> Option<Temporary<Attr>> {
-        self.get_attributes(local_name).into_iter().map(|attr| attr.root())
-            .find(|attr| attr.r().namespace() == namespace)
-            .map(|x| Temporary::from_rooted(x.r()))
+        let mut attributes = RootedVec::new();
+        self.get_attributes(local_name, &mut attributes);
+        attributes.iter().map(|attr| attr.root()).find(|attr| attr.r().namespace() == namespace).map(|x| Temporary::from_rooted(x.r()))
     }
 
     // https://dom.spec.whatwg.org/#concept-element-attributes-get-by-name
@@ -724,25 +812,24 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
              .map(|x| Temporary::from_rooted(x.r()))
     }
 
-    fn get_attributes(self, local_name: &Atom) -> Vec<Temporary<Attr>> {
+    // https://dom.spec.whatwg.org/#concept-element-attributes-get-by-name
+    fn get_attributes(self, local_name: &Atom, attributes: &mut RootedVec<JS<Attr>>) {
         // FIXME(https://github.com/rust-lang/rust/issues/23338)
         let attrs = self.attrs.borrow();
-        attrs.iter().map(|attr| attr.root()).filter_map(|attr| {
+        for ref attr in attrs.iter().map(|attr| attr.root()) {
             // FIXME(https://github.com/rust-lang/rust/issues/23338)
             let attr = attr.r();
             let attr_local_name = attr.local_name();
             if attr_local_name == local_name {
-                Some(Temporary::from_rooted(attr))
-            } else {
-                None
+                attributes.push(JS::from_rooted(attr));
             }
-        }).collect()
+        }
     }
 
     fn set_attribute_from_parser(self,
                                  qname: QualName,
                                  value: DOMString,
-                                 prefix: Option<DOMString>) {
+                                 prefix: Option<Atom>) {
         // Don't set if the attribute already exists, so we can handle add_attrs_if_missing
         if self.attrs.borrow().iter().map(|attr| attr.root())
                 .any(|a| *a.r().local_name() == qname.local && *a.r().namespace() == qname.ns) {
@@ -752,7 +839,7 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
         let name = match prefix {
             None => qname.local.clone(),
             Some(ref prefix) => {
-                let name = format!("{}:{}", *prefix, qname.local.as_slice());
+                let name = format!("{}:{}", &**prefix, &*qname.local);
                 Atom::from_slice(&name)
             },
         };
@@ -761,7 +848,7 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
     }
 
     fn set_attribute(self, name: &Atom, value: AttrValue) {
-        assert!(name.as_slice() == name.to_ascii_lowercase());
+        assert!(&**name == name.to_ascii_lowercase());
         assert!(!name.contains(":"));
 
         self.do_set_attribute(name.clone(), value, name.clone(),
@@ -790,7 +877,7 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
                            value: AttrValue,
                            name: Atom,
                            namespace: Namespace,
-                           prefix: Option<DOMString>,
+                           prefix: Option<Atom>,
                            cb: F)
         where F: Fn(JSRef<Attr>) -> bool
     {
@@ -883,7 +970,7 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
     }
 
     fn set_atomic_attribute(self, local_name: &Atom, value: DOMString) {
-        assert!(local_name.as_slice() == local_name.to_ascii_lowercase());
+        assert!(&**local_name == local_name.to_ascii_lowercase());
         let value = AttrValue::from_atomic(value);
         self.set_attribute(local_name, value);
     }
@@ -909,7 +996,7 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
     }
 
     fn get_url_attribute(self, local_name: &Atom) -> DOMString {
-        assert!(local_name.as_slice() == local_name.to_ascii_lowercase());
+        assert!(&**local_name == local_name.to_ascii_lowercase());
         if !self.has_attribute(local_name) {
             return "".to_owned();
         }
@@ -934,7 +1021,7 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
         }
     }
     fn set_string_attribute(self, local_name: &Atom, value: DOMString) {
-        assert!(local_name.as_slice() == local_name.to_ascii_lowercase());
+        assert!(&**local_name == local_name.to_ascii_lowercase());
         self.set_attribute(local_name, AttrValue::String(value));
     }
 
@@ -950,33 +1037,33 @@ impl<'a> AttributeHandlers for JSRef<'a, Element> {
     }
 
     fn set_tokenlist_attribute(self, local_name: &Atom, value: DOMString) {
-        assert!(local_name.as_slice() == local_name.to_ascii_lowercase());
+        assert!(&**local_name == local_name.to_ascii_lowercase());
         self.set_attribute(local_name, AttrValue::from_serialized_tokenlist(value));
     }
 
     fn set_atomic_tokenlist_attribute(self, local_name: &Atom, tokens: Vec<Atom>) {
-        assert!(local_name.as_slice() == local_name.to_ascii_lowercase());
+        assert!(&**local_name == local_name.to_ascii_lowercase());
         self.set_attribute(local_name, AttrValue::from_atomic_tokens(tokens));
     }
 
-    fn get_uint_attribute(self, local_name: &Atom) -> u32 {
+    fn get_uint_attribute(self, local_name: &Atom, default: u32) -> u32 {
         assert!(local_name.chars().all(|ch| {
             !ch.is_ascii() || ch.to_ascii_lowercase() == ch
         }));
         let attribute = self.get_attribute(&ns!(""), local_name).root();
         match attribute {
-            Some(attribute) => {
+            Some(ref attribute) => {
                 match *attribute.r().value() {
                     AttrValue::UInt(_, value) => value,
                     _ => panic!("Expected an AttrValue::UInt: \
                                  implement parse_plain_attribute"),
                 }
             }
-            None => 0,
+            None => default,
         }
     }
     fn set_uint_attribute(self, local_name: &Atom, value: u32) {
-        assert!(local_name.as_slice() == local_name.to_ascii_lowercase());
+        assert!(&**local_name == local_name.to_ascii_lowercase());
         self.set_attribute(local_name, AttrValue::UInt(value.to_string(), value));
     }
 }
@@ -986,13 +1073,13 @@ impl<'a> ElementMethods for JSRef<'a, Element> {
     fn GetNamespaceURI(self) -> Option<DOMString> {
         match self.namespace {
             ns!("") => None,
-            Namespace(ref ns) => Some(ns.as_slice().to_owned())
+            Namespace(ref ns) => Some((**ns).to_owned())
         }
     }
 
     // https://dom.spec.whatwg.org/#dom-element-localname
     fn LocalName(self) -> DOMString {
-        self.local_name.as_slice().to_owned()
+        (*self.local_name).to_owned()
     }
 
     // https://dom.spec.whatwg.org/#dom-element-prefix
@@ -1004,11 +1091,9 @@ impl<'a> ElementMethods for JSRef<'a, Element> {
     fn TagName(self) -> DOMString {
         let qualified_name = match self.prefix {
             Some(ref prefix) => {
-                (format!("{}:{}",
-                         prefix.as_slice(),
-                         self.local_name.as_slice())).into_cow()
+                Cow::Owned(format!("{}:{}", &**prefix, &*self.local_name))
             },
-            None => self.local_name.as_slice().into_cow()
+            None => Cow::Borrowed(&*self.local_name)
         };
         if self.html_element_in_html_document() {
             qualified_name.to_ascii_uppercase()
@@ -1100,8 +1185,7 @@ impl<'a> ElementMethods for JSRef<'a, Element> {
         let qualified_name = Atom::from_slice(&qualified_name);
         let value = self.parse_attribute(&namespace, &local_name, value);
         self.do_set_attribute(local_name.clone(), value, qualified_name,
-                              namespace.clone(), prefix.map(|s| s.to_owned()),
-                              |attr| {
+                              namespace.clone(), prefix, |attr| {
             *attr.local_name() == local_name &&
             *attr.namespace() == namespace
         });
@@ -1211,11 +1295,13 @@ impl<'a> ElementMethods for JSRef<'a, Element> {
         let context_document = document_from_node(self).root();
         let context_node: JSRef<Node> = NodeCast::from_ref(self);
         // Step 1.
-        let context_parent = match context_node.parent_node() {
-            // Step 2.
-            None => return Ok(()),
-            Some(parent) => parent.root()
-        };
+        let context_parent = match context_node.GetParentNode() {
+            None => {
+                // Step 2.
+                return Ok(());
+            },
+            Some(parent) => parent,
+        }.root();
 
         let parent = match context_parent.r().type_id() {
             // Step 3.
@@ -1226,11 +1312,10 @@ impl<'a> ElementMethods for JSRef<'a, Element> {
                 let body_elem = Element::create(QualName::new(ns!(HTML), atom!(body)),
                                                 None, context_document.r(),
                                                 ElementCreator::ScriptCreated);
-                let body_node: Temporary<Node> = NodeCast::from_temporary(body_elem);
-                body_node.root()
+                NodeCast::from_temporary(body_elem)
             },
-            _ => context_node.parent_node().unwrap().root()
-        };
+            _ => context_node.GetParentNode().unwrap()
+        }.root();
 
         // Step 5.
         let frag = try!(parent.r().parse_fragment(value));
@@ -1365,7 +1450,7 @@ impl<'a> VirtualMethods for JSRef<'a, Element> {
                 let doc = document_from_node(*self).root();
                 let base_url = doc.r().url();
                 let value = attr.value();
-                let style = Some(parse_style_attribute(value.as_slice(), &base_url));
+                let style = Some(parse_style_attribute(&value, &base_url));
                 *self.style_attribute.borrow_mut() = style;
 
                 if node.is_in_doc() {
@@ -1384,8 +1469,8 @@ impl<'a> VirtualMethods for JSRef<'a, Element> {
                 let value = attr.value();
                 if node.is_in_doc() {
                     let doc = document_from_node(*self).root();
-                    if !value.as_slice().is_empty() {
-                        let value = Atom::from_slice(value.as_slice());
+                    if !value.is_empty() {
+                        let value = value.atom().unwrap().clone();
                         doc.r().register_named_element(*self, value);
                     }
                     doc.r().content_changed(node, NodeDamage::NodeStyleDamaged);
@@ -1422,8 +1507,8 @@ impl<'a> VirtualMethods for JSRef<'a, Element> {
                 let value = attr.value();
                 if node.is_in_doc() {
                     let doc = document_from_node(*self).root();
-                    if !value.as_slice().is_empty() {
-                        let value = Atom::from_slice(value.as_slice());
+                    if !value.is_empty() {
+                        let value = value.atom().unwrap().clone();
                         doc.r().unregister_named_element(*self, value);
                     }
                     doc.r().content_changed(node, NodeDamage::NodeStyleDamaged);
@@ -1461,7 +1546,7 @@ impl<'a> VirtualMethods for JSRef<'a, Element> {
 
         if !tree_in_doc { return; }
 
-        if let Some(attr) = self.get_attribute(&ns!(""), &atom!("id")).root() {
+        if let Some(ref attr) = self.get_attribute(&ns!(""), &atom!("id")).root() {
             let doc = document_from_node(*self).root();
             let value = attr.r().Value();
             if !value.is_empty() {
@@ -1478,7 +1563,7 @@ impl<'a> VirtualMethods for JSRef<'a, Element> {
 
         if !tree_in_doc { return; }
 
-        if let Some(attr) = self.get_attribute(&ns!(""), &atom!("id")).root() {
+        if let Some(ref attr) = self.get_attribute(&ns!(""), &atom!("id")).root() {
             let doc = document_from_node(*self).root();
             let value = attr.r().Value();
             if !value.is_empty() {
@@ -1490,37 +1575,30 @@ impl<'a> VirtualMethods for JSRef<'a, Element> {
 }
 
 impl<'a> style::node::TElement<'a> for JSRef<'a, Element> {
-    #[allow(unsafe_code)]
-    fn get_attr(self, namespace: &Namespace, local_name: &Atom) -> Option<&'a str> {
-        self.get_attribute(namespace, local_name).root().map(|attr| {
-            // This transmute is used to cheat the lifetime restriction.
-            // FIXME(https://github.com/rust-lang/rust/issues/23338)
-            let attr = attr.r();
-            let value = attr.value();
-            unsafe { mem::transmute(value.as_slice()) }
-        })
-    }
-    #[allow(unsafe_code)]
-    fn get_attrs(self, local_name: &Atom) -> Vec<&'a str> {
-        self.get_attributes(local_name).into_iter().map(|attr| attr.root()).map(|attr| {
-            // FIXME(https://github.com/rust-lang/rust/issues/23338)
-            let attr = attr.r();
-            let value = attr.value();
-            // This transmute is used to cheat the lifetime restriction.
-            unsafe { mem::transmute(value.as_slice()) }
-        }).collect()
-    }
-    fn get_link(self) -> Option<&'a str> {
+    fn is_link(self) -> bool {
         // FIXME: This is HTML only.
         let node: JSRef<Node> = NodeCast::from_ref(self);
         match node.type_id() {
             // https://html.spec.whatwg.org/multipage/#selector-link
             NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLAnchorElement)) |
             NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLAreaElement)) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLLinkElement)) => self.get_attr(&ns!(""), &atom!("href")),
-            _ => None,
+            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLLinkElement)) => {
+                self.has_attribute(&atom!("href"))
+            },
+            _ => false,
          }
     }
+
+    #[inline]
+    fn is_unvisited_link(self) -> bool {
+        self.is_link()
+    }
+
+    #[inline]
+    fn is_visited_link(self) -> bool {
+        false
+    }
+
     fn get_local_name(self) -> &'a Atom {
         // FIXME(zwarich): Remove this when UFCS lands and there is a better way
         // of disambiguating methods.
@@ -1700,7 +1778,7 @@ impl<'a> ActivationElementHelpers<'a> for JSRef<'a, Element> {
         // Step 4
         let e = self.nearest_activable_element().root();
         match e {
-            Some(el) => match el.r().as_maybe_activatable() {
+            Some(ref el) => match el.r().as_maybe_activatable() {
                 Some(elem) => {
                     // Step 5-6
                     elem.pre_click_activation();

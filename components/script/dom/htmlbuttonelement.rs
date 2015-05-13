@@ -9,7 +9,7 @@ use dom::bindings::codegen::Bindings::HTMLButtonElementBinding;
 use dom::bindings::codegen::Bindings::HTMLButtonElementBinding::HTMLButtonElementMethods;
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLElementCast, HTMLButtonElementCast, NodeCast};
 use dom::bindings::codegen::InheritTypes::{HTMLButtonElementDerived, HTMLFieldSetElementDerived};
-use dom::bindings::js::{JSRef, Temporary};
+use dom::bindings::js::{JSRef, Rootable, Temporary};
 use dom::document::Document;
 use dom::element::{AttributeHandlers, Element, ElementTypeId};
 use dom::element::ActivationElementHelpers;
@@ -29,7 +29,7 @@ use std::cell::Cell;
 use string_cache::Atom;
 
 #[jstraceable]
-#[derive(PartialEq, Copy)]
+#[derive(PartialEq, Copy, Clone)]
 #[allow(dead_code)]
 enum ButtonType {
     ButtonSubmit,
@@ -83,7 +83,7 @@ impl<'a> HTMLButtonElementMethods for JSRef<'a, HTMLButtonElement> {
         let elem: JSRef<Element> = ElementCast::from_ref(self);
         let ty = elem.get_string_attribute(&atom!("type")).into_ascii_lowercase();
         // https://html.spec.whatwg.org/multipage/#attr-button-type
-        match ty.as_slice() {
+        match &*ty {
             "reset" | "button" | "menu" => ty,
             _ => "submit".to_owned()
         }
@@ -108,6 +108,18 @@ impl<'a> HTMLButtonElementMethods for JSRef<'a, HTMLButtonElement> {
     make_getter!(FormTarget);
 
     make_setter!(SetFormTarget, "formtarget");
+
+    // https://html.spec.whatwg.org/multipage/#dom-fe-name
+    make_getter!(Name);
+
+    // https://html.spec.whatwg.org/multipage/#dom-fe-name
+    make_setter!(SetName, "name");
+
+    // https://html.spec.whatwg.org/multipage/#dom-button-value
+    make_getter!(Value);
+
+    // https://html.spec.whatwg.org/multipage/#dom-button-value
+    make_setter!(SetValue, "value");
 }
 
 impl<'a> VirtualMethods for JSRef<'a, HTMLButtonElement> {

@@ -55,8 +55,15 @@ def notify(elapsed):
             print("[Warning] Could not generate notification! Please make sure that the required libraries are installed!")
 
     elif sys.platform.startswith('darwin'):
-        # Notification code for Darwin here! For the time being printing simple msg
-        print("[Warning] : Darwin System! Notifications not supported currently!")
+        try:
+            from distutils.spawn import find_executable
+            notifier = find_executable('terminal-notifier')
+            if not notifier:
+                raise Exception('`terminal-notifier` not found')
+            subprocess.call([notifier, '-title', 'Servo Build System',
+                             '-group', 'servobuild', '-message', 'Servo build complete!'])
+        except:
+            print("[Warning] Could not generate notification! Make sure that `terminal-notifier is installed!")
 
 
 @CommandProvider
@@ -70,6 +77,9 @@ class MachCommands(CommandBase):
     @CommandArgument('--release', '-r',
                      action='store_true',
                      help='Build in release mode')
+    @CommandArgument('--dev', '-d',
+                     action='store_true',
+                     help='Build in development mode')
     @CommandArgument('--jobs', '-j',
                      default=None,
                      help='Number of jobs to run in parallel')
@@ -86,8 +96,8 @@ class MachCommands(CommandBase):
                      help='Print verbose output')
     @CommandArgument('params', nargs='...',
                      help="Command-line arguments to be passed through to Cargo")
-    def build(self, target=None, release=False, jobs=None, android=None,
-              verbose=False, debug_mozjs=False, params=None):
+    def build(self, target=None, release=False, dev=False, jobs=None,
+              android=None, verbose=False, debug_mozjs=False, params=None):
         self.ensure_bootstrapped()
 
         if android is None:
@@ -136,6 +146,8 @@ class MachCommands(CommandBase):
                 status = subprocess.call(
                     make_cmd + ["-f", "openssl.makefile"],
                     env=self.build_env())
+                if status:
+                    return status
             openssl_dir = path.join(self.android_support_dir(), "openssl-1.0.1k")
             env['OPENSSL_LIB_DIR'] = openssl_dir
             env['OPENSSL_INCLUDE_DIR'] = path.join(openssl_dir, "include")

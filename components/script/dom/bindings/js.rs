@@ -31,17 +31,18 @@
 //!   the self value will not be collected for the duration of the method call.
 //!
 //! Both `Temporary<T>` and `JS<T>` do not allow access to their inner value
-//! without explicitly creating a stack-based root via the `root` method. This
-//! returns a `Root<T>`, which causes the JS-owned value to be uncollectable
-//! for the duration of the `Root` object's lifetime. A `JSRef<T>` can be
-//! obtained from a `Root<T>` by calling the `r` method. These `JSRef<T>`
-//! values are not allowed to outlive their originating `Root<T>`, to ensure
-//! that all interactions with the enclosed value only occur when said value is
-//! uncollectable, and will cause static lifetime errors if misused.
+//! without explicitly creating a stack-based root via the `root` method
+//! through the `Rootable<T>` trait. This returns a `Root<T>`, which causes the
+//! JS-owned value to be uncollectable for the duration of the `Root` object's
+//! lifetime. A `JSRef<T>` can be obtained from a `Root<T>` by calling the `r`
+//! method. These `JSRef<T>` values are not allowed to outlive their
+//! originating `Root<T>`, to ensure that all interactions with the enclosed
+//! value only occur when said value is uncollectable, and will cause static
+//! lifetime errors if misused.
 //!
 //! Other miscellaneous helper traits:
 //!
-//! - `OptionalRootable` and `OptionalRootedRootable`: make rooting `Option`
+//! - `OptionalRootable` and `OptionalOptionalRootable`: make rooting `Option`
 //!   values easy via a `root` method
 //! - `ResultRootable`: make rooting successful `Result` values easy
 //! - `TemporaryPushable`: allows mutating vectors of `JS<T>` with new elements
@@ -64,7 +65,6 @@ use std::cell::{Cell, UnsafeCell};
 use std::default::Default;
 use std::intrinsics::return_address;
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::Deref;
 
 /// An unrooted, JS-owned value. Must not be held across a GC.
@@ -109,9 +109,11 @@ impl<T: Reflectable> Unrooted<T> {
     pub unsafe fn unsafe_get(&self) -> *const T {
         *self.ptr
     }
+}
 
+impl<T: Reflectable> Rootable<T> for Unrooted<T> {
     /// Create a stack-bounded root for this value.
-    pub fn root(self) -> Root<T> {
+    fn root(&self) -> Root<T> {
         STACK_ROOTS.with(|ref collection| {
             let RootCollectionPtr(collection) = collection.get().unwrap();
             unsafe {
@@ -122,6 +124,9 @@ impl<T: Reflectable> Unrooted<T> {
 }
 
 impl<T> Copy for Unrooted<T> {}
+impl<T> Clone for Unrooted<T> {
+    fn clone(&self) -> Unrooted<T> { *self }
+}
 
 /// A type that represents a JS-owned value that is rooted for the lifetime of
 /// this value. Importantly, it requires explicit rooting in order to interact
@@ -151,14 +156,6 @@ impl<T> PartialEq for Temporary<T> {
 }
 
 impl<T: Reflectable> Temporary<T> {
-    /// Create a new `Temporary` value from a JS-owned value.
-    pub fn new(inner: JS<T>) -> Temporary<T> {
-        Temporary {
-            inner: inner,
-            _js_ptr: inner.reflector().get_jsobject(),
-        }
-    }
-
     /// Create a new `Temporary` value from an unrooted value.
     #[allow(unrooted_must_root)]
     pub fn from_unrooted(unrooted: Unrooted<T>) -> Temporary<T> {
@@ -169,29 +166,20 @@ impl<T: Reflectable> Temporary<T> {
     }
 
     /// Create a new `Temporary` value from a rooted value.
-    pub fn from_rooted<'a>(root: JSRef<'a, T>) -> Temporary<T> {
-        Temporary::new(JS::from_rooted(root))
+    #[allow(unrooted_must_root)]
+    pub fn from_rooted<U: Assignable<T>>(root: U) -> Temporary<T> {
+        let inner = JS::from_rooted(root);
+        Temporary {
+            inner: inner,
+            _js_ptr: inner.reflector().get_jsobject(),
+        }
     }
+}
 
+impl<T: Reflectable> Rootable<T> for Temporary<T> {
     /// Create a stack-bounded root for this value.
-    pub fn root(&self) -> Root<T> {
-        STACK_ROOTS.with(|ref collection| {
-            let RootCollectionPtr(collection) = collection.get().unwrap();
-            unsafe {
-                Root::new(&*collection, self.inner.ptr)
-            }
-        })
-    }
-
-    unsafe fn inner(&self) -> JS<T> {
-        self.inner.clone()
-    }
-
-    /// Returns `self` as a `Temporary` of another type. For use by
-    /// `InheritTypes` only.
-    //XXXjdm It would be lovely if this could be private.
-    pub unsafe fn transmute<To>(self) -> Temporary<To> {
-        mem::transmute(self)
+    fn root(&self) -> Root<T> {
+        self.inner.root()
     }
 }
 
@@ -272,9 +260,9 @@ impl LayoutJS<Node> {
     }
 }
 
-impl<T: Reflectable> JS<T> {
+impl<T: Reflectable> Rootable<T> for JS<T> {
     /// Root this JS-owned value to prevent its collection as garbage.
-    pub fn root(&self) -> Root<T> {
+    fn root(&self) -> Root<T> {
         STACK_ROOTS.with(|ref collection| {
             let RootCollectionPtr(collection) = collection.get().unwrap();
             unsafe {
@@ -347,54 +335,50 @@ impl<T: HeapGCValue+Copy> MutHeap<T> {
     }
 }
 
-/// A mutable `JS<T>` value, with nullability represented by an enclosing
-/// Option wrapper. Must be used in place of traditional internal mutability
-/// to ensure that the proper GC barriers are enforced.
+/// A mutable holder for GC-managed values such as `JSval` and `JS<T>`, with
+/// nullability represented by an enclosing Option wrapper. Must be used in
+/// place of traditional internal mutability to ensure that the proper GC
+/// barriers are enforced.
 #[must_root]
 #[jstraceable]
-pub struct MutNullableJS<T: Reflectable> {
-    ptr: Cell<Option<JS<T>>>
+pub struct MutNullableHeap<T: HeapGCValue+Copy> {
+    ptr: Cell<Option<T>>
 }
 
-impl<U: Reflectable> MutNullableJS<U> {
-    /// Create a new `MutNullableJS`
-    pub fn new<T: Assignable<U>>(initial: Option<T>) -> MutNullableJS<U> {
-        MutNullableJS {
-            ptr: Cell::new(initial.map(|initial| {
-                unsafe { initial.get_js() }
-            }))
+impl<T: HeapGCValue+Copy> MutNullableHeap<T> {
+    /// Create a new `MutNullableHeap`.
+    pub fn new(initial: Option<T>) -> MutNullableHeap<T> {
+        MutNullableHeap {
+            ptr: Cell::new(initial)
         }
     }
-}
 
-impl<T: Reflectable> Default for MutNullableJS<T> {
-    fn default() -> MutNullableJS<T> {
-        MutNullableJS {
-            ptr: Cell::new(None)
-        }
-    }
-}
-
-impl<T: Reflectable> MutNullableJS<T> {
-    /// Store an unrooted value in this field. This is safe under the
-    /// assumption that `MutNullableJS<T>` values are only used as fields in
-    /// DOM types that are reachable in the GC graph, so this unrooted value
-    /// becomes transitively rooted for the lifetime of its new owner.
-    pub fn assign<U: Assignable<T>>(&self, val: Option<U>) {
-        self.ptr.set(val.map(|val| {
-            unsafe { val.get_js() }
-        }));
-    }
-
-    /// Set the inner value to null, without making API users jump through
-    /// useless type-ascription hoops.
-    pub fn clear(&self) {
-        self.assign(None::<JS<T>>);
+    /// Set this `MutNullableHeap` to the given value, calling write barriers
+    /// as appropriate.
+    pub fn set(&self, val: Option<T>) {
+        self.ptr.set(val);
     }
 
     /// Retrieve a copy of the current optional inner value.
-    pub fn get(&self) -> Option<Temporary<T>> {
-        self.ptr.get().map(Temporary::new)
+    pub fn get(&self) -> Option<T> {
+        self.ptr.get()
+    }
+}
+
+impl<T: Reflectable> MutNullableHeap<JS<T>> {
+    /// Retrieve a copy of the current inner value. If it is `None`, it is
+    /// initialized with the result of `cb` first.
+    pub fn or_init<F>(&self, cb: F) -> Temporary<T>
+        where F: FnOnce() -> Temporary<T>
+    {
+        match self.get() {
+            Some(inner) => Temporary::from_rooted(inner),
+            None => {
+                let inner = cb();
+                self.set(Some(JS::from_rooted(inner.clone())));
+                inner
+            },
+        }
     }
 
     /// Retrieve a copy of the inner optional `JS<T>` as `LayoutJS<T>`.
@@ -402,19 +386,12 @@ impl<T: Reflectable> MutNullableJS<T> {
     pub unsafe fn get_inner_as_layout(&self) -> Option<LayoutJS<T>> {
         self.ptr.get().map(|js| js.to_layout())
     }
+}
 
-    /// Retrieve a copy of the current inner value. If it is `None`, it is
-    /// initialized with the result of `cb` first.
-    pub fn or_init<F>(&self, cb: F) -> Temporary<T>
-        where F: FnOnce() -> Temporary<T>
-    {
-        match self.get() {
-            Some(inner) => inner,
-            None => {
-                let inner = cb();
-                self.assign(Some(inner.clone()));
-                inner
-            },
+impl<T: HeapGCValue+Copy> Default for MutNullableHeap<T> {
+    fn default() -> MutNullableHeap<T> {
+        MutNullableHeap {
+            ptr: Cell::new(None)
         }
     }
 }
@@ -425,7 +402,7 @@ impl<T: Reflectable> JS<T> {
     /// are reachable in the GC graph, so this unrooted value becomes
     /// transitively rooted for the lifetime of its new owner.
     pub fn assign(&mut self, val: Temporary<T>) {
-        *self = unsafe { val.inner() };
+        *self = val.inner.clone();
     }
 }
 
@@ -435,20 +412,6 @@ impl<T: Reflectable> LayoutJS<T> {
     /// this is unsafe is what necessitates the layout wrappers.)
     pub unsafe fn unsafe_get(&self) -> *const T {
         *self.ptr
-    }
-}
-
-impl<From> JS<From> {
-    /// Return `self` as a `JS` of another type.
-    pub unsafe fn transmute_copy<To>(&self) -> JS<To> {
-        mem::transmute_copy(self)
-    }
-}
-
-impl<From> LayoutJS<From> {
-    /// Return `self` as a `LayoutJS` of another type.
-    pub unsafe fn transmute_copy<To>(&self) -> LayoutJS<To> {
-        mem::transmute_copy(self)
     }
 }
 
@@ -494,13 +457,15 @@ impl<T> Assignable<T> for JS<T> {
 
 impl<'a, T: Reflectable> Assignable<T> for JSRef<'a, T> {
     unsafe fn get_js(&self) -> JS<T> {
-        self.unrooted()
+        JS {
+            ptr: self.ptr
+        }
     }
 }
 
 impl<T: Reflectable> Assignable<T> for Temporary<T> {
     unsafe fn get_js(&self) -> JS<T> {
-        self.inner()
+        self.inner.clone()
     }
 }
 
@@ -508,63 +473,26 @@ impl<T: Reflectable> Assignable<T> for Temporary<T> {
 /// Root a rootable `Option` type (used for `Option<Temporary<T>>`)
 pub trait OptionalRootable<T> {
     /// Root the inner value, if it exists.
-    fn root(self) -> Option<Root<T>>;
-}
-
-impl<T: Reflectable> OptionalRootable<T> for Option<Temporary<T>> {
-    fn root(self) -> Option<Root<T>> {
-        self.map(|inner| inner.root())
-    }
-}
-
-/// Return an unrooted type for storing in optional DOM fields
-pub trait OptionalUnrootable<T> {
-    /// Returns a `JS<T>` for the inner value, if it exists.
-    fn unrooted(&self) -> Option<JS<T>>;
-}
-
-impl<'a, T: Reflectable> OptionalUnrootable<T> for Option<JSRef<'a, T>> {
-    fn unrooted(&self) -> Option<JS<T>> {
-        self.as_ref().map(|inner| JS::from_rooted(*inner))
-    }
-}
-
-/// Root a rootable `Option` type (used for `Option<JS<T>>`)
-pub trait OptionalRootedRootable<T> {
-    /// Root the inner value, if it exists.
     fn root(&self) -> Option<Root<T>>;
 }
 
-impl<T: Reflectable> OptionalRootedRootable<T> for Option<JS<T>> {
-    fn root(&self) -> Option<Root<T>> {
-        self.as_ref().map(|inner| inner.root())
-    }
-}
-
-impl<T: Reflectable> OptionalRootedRootable<T> for Option<Unrooted<T>> {
+impl<T: Reflectable, U: Rootable<T>> OptionalRootable<T> for Option<U> {
     fn root(&self) -> Option<Root<T>> {
         self.as_ref().map(|inner| inner.root())
     }
 }
 
 /// Root a rootable `Option<Option>` type (used for `Option<Option<JS<T>>>`)
-pub trait OptionalOptionalRootedRootable<T> {
+pub trait OptionalOptionalRootable<T> {
     /// Root the inner value, if it exists.
     fn root(&self) -> Option<Option<Root<T>>>;
 }
 
-impl<T: Reflectable> OptionalOptionalRootedRootable<T> for Option<Option<JS<T>>> {
+impl<T: Reflectable, U: OptionalRootable<T>> OptionalOptionalRootable<T> for Option<U> {
     fn root(&self) -> Option<Option<Root<T>>> {
         self.as_ref().map(|inner| inner.root())
     }
 }
-
-impl<T: Reflectable> OptionalOptionalRootedRootable<T> for Option<Option<Unrooted<T>>> {
-    fn root(&self) -> Option<Option<Root<T>>> {
-        self.as_ref().map(|inner| inner.root())
-    }
-}
-
 
 /// Root a rootable `Result` type (any of `Temporary<T>` or `JS<T>`)
 pub trait ResultRootable<T,U> {
@@ -572,17 +500,18 @@ pub trait ResultRootable<T,U> {
     fn root(self) -> Result<Root<T>, U>;
 }
 
-impl<T: Reflectable, U> ResultRootable<T, U> for Result<Temporary<T>, U> {
+impl<T: Reflectable, U, V: Rootable<T>> ResultRootable<T, U> for Result<V, U> {
     fn root(self) -> Result<Root<T>, U> {
         self.map(|inner| inner.root())
     }
 }
 
-impl<T: Reflectable, U> ResultRootable<T, U> for Result<JS<T>, U> {
-    fn root(self) -> Result<Root<T>, U> {
-        self.map(|inner| inner.root())
-    }
+/// Root a rootable type.
+pub trait Rootable<T> {
+    /// Root the value.
+    fn root(&self) -> Root<T>;
 }
+
 
 /// Provides a facility to push unrooted values onto lists of rooted values.
 /// This is safe under the assumption that said lists are reachable via the GC
@@ -610,6 +539,7 @@ impl<T: Assignable<U>, U: Reflectable> TemporaryPushable<T> for Vec<JS<U>> {
 ///
 /// See also [*Exact Stack Rooting - Storing a GCPointer on the CStack*]
 /// (https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey/Internals/GC/Exact_Stack_Rooting).
+#[no_move]
 pub struct RootCollection {
     roots: UnsafeCell<RootedVec<*mut JSObject>>,
 }
@@ -618,6 +548,9 @@ pub struct RootCollection {
 pub struct RootCollectionPtr(pub *const RootCollection);
 
 impl Copy for RootCollectionPtr {}
+impl Clone for RootCollectionPtr {
+    fn clone(&self) -> RootCollectionPtr { *self }
+}
 
 impl RootCollection {
     /// Create an empty collection of roots
@@ -659,7 +592,8 @@ impl RootCollection {
 /// for the same JS value. `Root`s cannot outlive the associated
 /// `RootCollection` object. Attempts to transfer ownership of a `Root` via
 /// moving will trigger dynamic unrooting failures due to incorrect ordering.
-pub struct Root<T> {
+#[no_move]
+pub struct Root<T: Reflectable> {
     /// List that ensures correct dynamic root ordering
     root_list: &'static RootCollection,
     /// Reference to rooted value that must not outlive this container
@@ -707,7 +641,6 @@ impl<T: Reflectable> Root<T> {
     }
 }
 
-#[unsafe_destructor]
 impl<T: Reflectable> Drop for Root<T> {
     fn drop(&mut self) {
         self.root_list.unroot(self);
@@ -747,27 +680,6 @@ impl<'a, 'b, T> PartialEq<JSRef<'b, T>> for JSRef<'a, T> {
     }
 }
 
-impl<'a,T> JSRef<'a,T> {
-    /// Return `self` as a `JSRef` of another type.
-    //XXXjdm It would be lovely if this could be private.
-    pub unsafe fn transmute<To>(self) -> JSRef<'a, To> {
-        mem::transmute(self)
-    }
-
-    /// Return `self` as a borrowed reference to a `JSRef` of another type.
-    // FIXME(zwarich): It would be nice to get rid of this entirely.
-    pub unsafe fn transmute_borrowed<'b, To>(&'b self) -> &'b JSRef<'a, To> {
-        mem::transmute(self)
-    }
-
-    /// Return an unrooted `JS<T>` for the inner pointer.
-    pub fn unrooted(&self) -> JS<T> {
-        JS {
-            ptr: self.ptr
-        }
-    }
-}
-
 impl<'a, T: Reflectable> JSRef<'a, T> {
     /// Returns the inner pointer directly.
     pub fn extended_deref(self) -> &'a T {
@@ -780,27 +692,5 @@ impl<'a, T: Reflectable> JSRef<'a, T> {
 impl<'a, T: Reflectable> Reflectable for JSRef<'a, T> {
     fn reflector<'b>(&'b self) -> &'b Reflector {
         (**self).reflector()
-    }
-}
-
-/// A trait for comparing smart pointers ignoring the lifetimes
-pub trait Comparable<T> {
-    /// Returns whether the other value points to the same object.
-    fn equals(&self, other: T) -> bool;
-}
-
-impl<'a, 'b, T> Comparable<JSRef<'a, T>> for JSRef<'b, T> {
-    fn equals(&self, other: JSRef<'a, T>) -> bool {
-        self.ptr == other.ptr
-    }
-}
-
-impl<'a, 'b, T> Comparable<Option<JSRef<'a, T>>> for Option<JSRef<'b, T>> {
-    fn equals(&self, other: Option<JSRef<'a, T>>) -> bool {
-        match (*self, other) {
-            (Some(x), Some(y)) => x.ptr == y.ptr,
-            (None, None) => true,
-            _ => false
-        }
     }
 }

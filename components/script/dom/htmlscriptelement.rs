@@ -4,6 +4,7 @@
 
 use std::ascii::AsciiExt;
 
+use document_loader::LoadType;
 use dom::attr::Attr;
 use dom::attr::AttrHelpers;
 use dom::bindings::cell::DOMRefCell;
@@ -16,7 +17,8 @@ use dom::bindings::codegen::InheritTypes::{HTMLScriptElementDerived, HTMLScriptE
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLElementCast, NodeCast};
 use dom::bindings::codegen::InheritTypes::EventTargetCast;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, JSRef, Temporary, OptionalRootable, RootedReference};
+use dom::bindings::js::{JS, JSRef, Temporary, OptionalRootable, Rootable};
+use dom::bindings::js::RootedReference;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::trace::JSTraceable;
 use dom::document::{Document, DocumentHelpers};
@@ -33,7 +35,7 @@ use script_task::{ScriptMsg, Runnable};
 use encoding::all::UTF_8;
 use encoding::label::encoding_from_whatwg_label;
 use encoding::types::{Encoding, EncodingRef, DecoderTrap};
-use net_traits::{load_whole_resource, Metadata};
+use net_traits::Metadata;
 use util::str::{DOMString, HTML_SPACE_CHARACTERS, StaticStringVec};
 use std::borrow::ToOwned;
 use std::cell::Cell;
@@ -223,7 +225,7 @@ impl<'a> HTMLScriptElementHelpers for JSRef<'a, HTMLScriptElement> {
         }
 
         // Step 13.
-        if let Some(charset) = element.get_attribute(&ns!(""), &Atom::from_slice("charset")).root() {
+        if let Some(ref charset) = element.get_attribute(&ns!(""), &Atom::from_slice("charset")).root() {
             if let Some(encodingRef) = encoding_from_whatwg_label(&charset.r().Value()) {
                 *self.block_character_encoding.borrow_mut() = encodingRef;
             }
@@ -236,7 +238,7 @@ impl<'a> HTMLScriptElementHelpers for JSRef<'a, HTMLScriptElement> {
 
         let load = match element.get_attribute(&ns!(""), &atom!("src")).root() {
             // Step 14.
-            Some(src) => {
+            Some(ref src) => {
                 // Step 14.1
                 let src = src.r().Value();
 
@@ -260,7 +262,9 @@ impl<'a> HTMLScriptElementHelpers for JSRef<'a, HTMLScriptElement> {
                         // state of the element's `crossorigin` content attribute, the origin being
                         // the origin of the script element's node document, and the default origin
                         // behaviour set to taint.
-                        ScriptOrigin::External(load_whole_resource(&window.resource_task(), url))
+                        let doc = document_from_node(self).root();
+                        let contents = doc.r().load_sync(LoadType::Script(url));
+                        ScriptOrigin::External(contents)
                     }
                 }
             },
@@ -414,7 +418,7 @@ impl<'a> HTMLScriptElementHelpers for JSRef<'a, HTMLScriptElement> {
             },
             Some(ref s) => {
                 debug!("script type={}", *s);
-                SCRIPT_JS_MIMES.contains(&s.to_ascii_lowercase().as_slice().trim_matches(HTML_SPACE_CHARACTERS))
+                SCRIPT_JS_MIMES.contains(&s.to_ascii_lowercase().trim_matches(HTML_SPACE_CHARACTERS))
             },
             None => {
                 debug!("no script type");
@@ -427,7 +431,7 @@ impl<'a> HTMLScriptElementHelpers for JSRef<'a, HTMLScriptElement> {
                     },
                     Some(ref s) => {
                         debug!("script language={}", *s);
-                        SCRIPT_JS_MIMES.contains(&format!("text/{}", s).to_ascii_lowercase().as_slice())
+                        SCRIPT_JS_MIMES.contains(&&*format!("text/{}", s).to_ascii_lowercase())
                     },
                     None => {
                         debug!("no script type or language, inferring js");

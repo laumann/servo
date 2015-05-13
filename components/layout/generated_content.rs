@@ -21,7 +21,7 @@ use std::sync::Arc;
 use style::computed_values::content::ContentItem;
 use style::computed_values::{display, list_style_type};
 use style::properties::ComputedValues;
-use util::smallvec::{SmallVec, SmallVec8};
+use util::smallvec::SmallVec8;
 
 // Decimal styles per CSS-COUNTER-STYLES § 6.1:
 static DECIMAL: [char; 10] = [ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' ];
@@ -186,7 +186,7 @@ impl<'a,'b> ResolveGeneratedContentFragmentMutator<'a,'b> {
                     let mut temporary_counter = Counter::new();
                     let counter = self.traversal
                                       .counters
-                                      .get(counter_name.as_slice())
+                                      .get(&*counter_name)
                                       .unwrap_or(&mut temporary_counter);
                     new_info = counter.render(self.traversal.layout_context,
                                               fragment.node,
@@ -200,13 +200,13 @@ impl<'a,'b> ResolveGeneratedContentFragmentMutator<'a,'b> {
                     let mut temporary_counter = Counter::new();
                     let counter = self.traversal
                                       .counters
-                                      .get(counter_name.as_slice())
+                                      .get(&*counter_name)
                                       .unwrap_or(&mut temporary_counter);
                     new_info = counter.render(self.traversal.layout_context,
                                               fragment.node,
                                               fragment.style.clone(),
                                               counter_style,
-                                              RenderingMode::All(separator.as_slice()));
+                                              RenderingMode::All(&separator));
                 }
                 GeneratedContentInfo::ContentItem(ContentItem::OpenQuote) => {
                     new_info = Some(render_text(self.traversal.layout_context,
@@ -530,9 +530,7 @@ fn push_alphabetic_representation(mut value: i32, system: &[char], accumulator: 
         value = ((value as usize) / system.len()) as i32;
     }
 
-    for i in (0..string.len()).rev() {
-        accumulator.push(*string.get(i))
-    }
+    accumulator.extend(string.iter().cloned().rev())
 }
 
 /// Pushes the string that represents the value rendered using the given *numeric system* onto the
@@ -554,8 +552,6 @@ fn push_numeric_representation(mut value: i32, system: &[char], accumulator: &mu
     }
 
     // Step 3.
-    for &ch in string.iter().rev() {
-        accumulator.push(ch)
-    }
+    accumulator.extend(string.iter().cloned().rev())
 }
 

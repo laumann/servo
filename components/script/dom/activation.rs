@@ -4,7 +4,7 @@
 
 use dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use dom::bindings::codegen::InheritTypes::{EventCast, EventTargetCast};
-use dom::bindings::js::{JSRef, Temporary, OptionalRootable};
+use dom::bindings::js::{JSRef, Temporary, OptionalRootable, Rootable};
 use dom::element::{Element, ActivationElementHelpers};
 use dom::event::{Event, EventHelpers, EventBubbles, EventCancelable};
 use dom::eventtarget::EventTarget;
@@ -14,7 +14,7 @@ use dom::node::window_from_node;
 use std::borrow::ToOwned;
 
 /// Trait for elements with defined activation behavior
-pub trait Activatable : Copy {
+pub trait Activatable {
     fn as_element(&self) -> Temporary<Element>;
 
     // Is this particular instance of the element activatable?

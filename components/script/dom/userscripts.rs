@@ -5,7 +5,7 @@
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use dom::bindings::codegen::InheritTypes::NodeCast;
-use dom::bindings::js::{JSRef, OptionalRootable, RootedReference};
+use dom::bindings::js::{JSRef, OptionalRootable, Rootable, RootedReference};
 use dom::element::AttributeHandlers;
 use dom::htmlheadelement::HTMLHeadElement;
 use dom::node::{Node, NodeHelpers};
@@ -28,7 +28,7 @@ pub fn load_script(head: JSRef<HTMLHeadElement>) {
             p.push("user-agent-js");
             p
         } else {
-            PathBuf::new(path_str)
+            PathBuf::from(path_str)
         };
 
         let mut files = read_dir(&path).ok().expect("Bad path passed to --userscripts")

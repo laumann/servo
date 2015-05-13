@@ -20,12 +20,12 @@ use layers::platform::surface::{NativeGraphicsMetadata, NativePaintingGraphicsCo
 use layers::platform::surface::NativeSurface;
 use layers::layers::{BufferRequest, LayerBuffer, LayerBufferSet};
 use layers;
-use msg::compositor_msg::{Epoch, PaintState, LayerId};
+use msg::compositor_msg::{Epoch, FrameTreeId, PaintState, LayerId};
 use msg::compositor_msg::{LayerMetadata, PaintListener, ScrollPolicy};
 use msg::constellation_msg::Msg as ConstellationMsg;
 use msg::constellation_msg::{ConstellationChan, Failure, PipelineId};
 use msg::constellation_msg::PipelineExitType;
-use profile::time::{self, profile};
+use profile_traits::time::{self, profile};
 use skia::SkiaGrGLNativeContextRef;
 use std::borrow::ToOwned;
 use std::mem;
@@ -34,7 +34,6 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use util::geometry::{Au, ZERO_POINT};
 use util::opts;
-use util::smallvec::SmallVec;
 use util::task::spawn_named_with_send_on_failure;
 use util::task_state;
 use util::task::spawn_named;
@@ -83,13 +82,13 @@ Offer<PassCompositor,
 // Complicated protocol for the compositor to the paint task
 pub type CompositorToPaint = Offer<UnusedBuffer, Offer<Paint, Eps>>;
 pub type UnusedBuffer      = Recv<Vec<Box<LayerBuffer>>, Var<Z>>;
-pub type Paint             = Recv<Vec<PaintRequest>, Var<Z>>;
+pub type Paint             = Recv<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
 
 pub type LayoutToPaint = Offer<Recv<Arc<StackingContext>, Var<Z>>, Eps>;
 
 pub enum Msg {
     PaintInit(Arc<StackingContext>),
-    Paint(Vec<PaintRequest>),
+    Paint(Vec<PaintRequest>, FrameTreeId),
     UnusedBuffer(Vec<Box<LayerBuffer>>),
     PaintPermissionGranted,
     PaintPermissionRevoked,
@@ -364,7 +363,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                 }
             },
             Paint => {
-                let (c, requests) = compositor_chan.recv();
+                let (c, (requests, frame_tree_id)) = compositor_chan.recv();
 
                 if self.paint_permission {
                     let mut replies = Vec::new();
@@ -386,7 +385,7 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
                     }
 
                     debug!("PaintTask: returning surfaces");
-                    self.compositor.assign_painted_buffers(self.id, self.epoch, replies);
+                    self.compositor.assign_painted_buffers(self.id, self.epoch, replies, frame_tree_id);
                 } else {
                     debug!("PaintTask: paint ready msg");
                     let ConstellationChan(ref mut c) = self.constellation_chan;
@@ -658,8 +657,8 @@ impl WorkerThread {
             // Apply a translation to start at the boundaries of the stacking context, since the
             // layer's origin starts at its overflow rect's origin.
             let tile_bounds = tile.page_rect.translate(
-                &Point2D(stacking_context.overflow.origin.x.to_subpx() as AzFloat,
-                         stacking_context.overflow.origin.y.to_subpx() as AzFloat));
+                &Point2D(stacking_context.overflow.origin.x.to_f32_px(),
+                         stacking_context.overflow.origin.y.to_f32_px()));
 
             // Apply the translation to paint the tile we want.
             let matrix: Matrix2D<AzFloat> = Matrix2D::identity();
@@ -687,8 +686,8 @@ impl WorkerThread {
                 // painted this tile.
                 let color = THREAD_TINT_COLORS[thread_id % THREAD_TINT_COLORS.len()];
                 paint_context.draw_solid_color(&Rect(Point2D(Au(0), Au(0)),
-                                                     Size2D(Au::from_px(size.width as isize),
-                                                            Au::from_px(size.height as isize))),
+                                                     Size2D(Au::from_px(size.width),
+                                                            Au::from_px(size.height))),
                                                color);
             }
         }

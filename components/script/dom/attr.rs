@@ -6,9 +6,8 @@ use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::AttrBinding::{self, AttrMethods};
 use dom::bindings::codegen::InheritTypes::NodeCast;
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JSRef, MutNullableJS, Temporary};
-use dom::bindings::js::{OptionalRootable, OptionalRootedRootable};
-use dom::bindings::js::RootedReference;
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, Temporary};
+use dom::bindings::js::{OptionalRootable, Rootable, RootedReference};
 use dom::bindings::utils::{Reflector, reflect_dom_object};
 use dom::element::{Element, AttributeHandlers};
 use dom::node::Node;
@@ -23,6 +22,7 @@ use string_cache::{Atom, Namespace};
 use std::borrow::ToOwned;
 use std::cell::Ref;
 use std::mem;
+use std::ops::Deref;
 
 pub enum AttrSettingType {
     FirstSetAttr,
@@ -50,12 +50,29 @@ impl AttrValue {
     }
 
     pub fn from_atomic_tokens(atoms: Vec<Atom>) -> AttrValue {
-        let tokens = atoms.iter().map(Atom::as_slice).collect::<Vec<_>>().connect("\x20");
+        let tokens = atoms.iter().map(|x| &**x).collect::<Vec<_>>().connect("\x20");
         AttrValue::TokenList(tokens, atoms)
     }
 
+    // https://html.spec.whatwg.org/multipage/#reflecting-content-attributes-in-idl-attributes:idl-unsigned-long
     pub fn from_u32(string: DOMString, default: u32) -> AttrValue {
         let result = parse_unsigned_integer(string.chars()).unwrap_or(default);
+        let result = if result > 2147483647 {
+            default
+        } else {
+            result
+        };
+        AttrValue::UInt(string, result)
+    }
+
+    // https://html.spec.whatwg.org/multipage/#limited-to-only-non-negative-numbers-greater-than-zero
+    pub fn from_limited_u32(string: DOMString, default: u32) -> AttrValue {
+        let result = parse_unsigned_integer(string.chars()).unwrap_or(default);
+        let result = if result == 0 || result > 2147483647 {
+            default
+        } else {
+            result
+        };
         AttrValue::UInt(string, result)
     }
 
@@ -66,14 +83,23 @@ impl AttrValue {
 
     pub fn tokens<'a>(&'a self) -> Option<&'a [Atom]> {
         match *self {
-            AttrValue::TokenList(_, ref tokens) => Some(tokens.as_slice()),
+            AttrValue::TokenList(_, ref tokens) => Some(tokens),
+            _ => None
+        }
+    }
+
+    pub fn atom<'a>(&'a self) -> Option<&'a Atom> {
+        match *self {
+            AttrValue::Atom(ref value) => Some(value),
             _ => None
         }
     }
 }
 
-impl Str for AttrValue {
-    fn as_slice<'a>(&'a self) -> &'a str {
+impl Deref for AttrValue {
+    type Target = str;
+
+    fn deref<'a>(&'a self) -> &'a str {
         match *self {
             AttrValue::String(ref value) |
                 AttrValue::TokenList(ref value, _) |
@@ -91,15 +117,15 @@ pub struct Attr {
     value: DOMRefCell<AttrValue>,
     name: Atom,
     namespace: Namespace,
-    prefix: Option<DOMString>,
+    prefix: Option<Atom>,
 
     /// the element that owns this attribute.
-    owner: MutNullableJS<Element>,
+    owner: MutNullableHeap<JS<Element>>,
 }
 
 impl Attr {
     fn new_inherited(local_name: Atom, value: AttrValue, name: Atom, namespace: Namespace,
-                     prefix: Option<DOMString>, owner: Option<JSRef<Element>>) -> Attr {
+                     prefix: Option<Atom>, owner: Option<JSRef<Element>>) -> Attr {
         Attr {
             reflector_: Reflector::new(),
             local_name: local_name,
@@ -107,13 +133,13 @@ impl Attr {
             name: name,
             namespace: namespace,
             prefix: prefix,
-            owner: MutNullableJS::new(owner),
+            owner: MutNullableHeap::new(owner.map(JS::from_rooted)),
         }
     }
 
     pub fn new(window: JSRef<Window>, local_name: Atom, value: AttrValue,
                name: Atom, namespace: Namespace,
-               prefix: Option<DOMString>, owner: Option<JSRef<Element>>) -> Temporary<Attr> {
+               prefix: Option<Atom>, owner: Option<JSRef<Element>>) -> Temporary<Attr> {
         reflect_dom_object(
             box Attr::new_inherited(local_name, value, name, namespace, prefix, owner),
             GlobalRef::Window(window),
@@ -131,7 +157,7 @@ impl Attr {
     }
 
     #[inline]
-    pub fn prefix<'a>(&'a self) -> &'a Option<DOMString> {
+    pub fn prefix<'a>(&'a self) -> &'a Option<Atom> {
         &self.prefix
     }
 }
@@ -139,12 +165,12 @@ impl Attr {
 impl<'a> AttrMethods for JSRef<'a, Attr> {
     // https://dom.spec.whatwg.org/#dom-attr-localname
     fn LocalName(self) -> DOMString {
-        self.local_name().as_slice().to_owned()
+        (**self.local_name()).to_owned()
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-value
     fn Value(self) -> DOMString {
-        self.value().as_slice().to_owned()
+        (**self.value()).to_owned()
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-value
@@ -181,13 +207,13 @@ impl<'a> AttrMethods for JSRef<'a, Attr> {
 
     // https://dom.spec.whatwg.org/#dom-attr-name
     fn Name(self) -> DOMString {
-        self.name.as_slice().to_owned()
+        (*self.name).to_owned()
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-namespaceuri
     fn GetNamespaceURI(self) -> Option<DOMString> {
         let Namespace(ref atom) = self.namespace;
-        match atom.as_slice() {
+        match &**atom {
             "" => None,
             url => Some(url.to_owned()),
         }
@@ -195,7 +221,7 @@ impl<'a> AttrMethods for JSRef<'a, Attr> {
 
     // https://dom.spec.whatwg.org/#dom-attr-prefix
     fn GetPrefix(self) -> Option<DOMString> {
-        self.prefix.clone()
+        self.prefix().as_ref().map(|p| (**p).to_owned())
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-ownerelement
@@ -261,17 +287,17 @@ impl<'a> AttrHelpers<'a> for JSRef<'a, Attr> {
             }
             (old, new) => assert!(old == new)
         }
-        self.owner.assign(owner)
+        self.owner.set(owner.map(JS::from_rooted))
     }
 
     fn owner(self) -> Option<Temporary<Element>> {
-        self.owner.get()
+        self.owner.get().map(Temporary::from_rooted)
     }
 
     fn summarize(self) -> AttrInfo {
         let Namespace(ref ns) = self.namespace;
         AttrInfo {
-            namespace: ns.as_slice().to_owned(),
+            namespace: (**ns).to_owned(),
             name: self.Name(),
             value: self.Value(),
         }
@@ -280,6 +306,7 @@ impl<'a> AttrHelpers<'a> for JSRef<'a, Attr> {
 
 #[allow(unsafe_code)]
 pub trait AttrHelpersForLayout {
+    unsafe fn value_forever(&self) -> &'static AttrValue;
     unsafe fn value_ref_forever(&self) -> &'static str;
     unsafe fn value_atom_forever(&self) -> Option<Atom>;
     unsafe fn value_tokens_forever(&self) -> Option<&'static [Atom]>;
@@ -289,10 +316,16 @@ pub trait AttrHelpersForLayout {
 #[allow(unsafe_code)]
 impl AttrHelpersForLayout for Attr {
     #[inline]
+    unsafe fn value_forever(&self) -> &'static AttrValue {
+        // This transmute is used to cheat the lifetime restriction.
+        mem::transmute::<&AttrValue, &AttrValue>(self.value.borrow_for_layout())
+    }
+
+    #[inline]
     unsafe fn value_ref_forever(&self) -> &'static str {
         // This transmute is used to cheat the lifetime restriction.
         let value = mem::transmute::<&AttrValue, &AttrValue>(self.value.borrow_for_layout());
-        value.as_slice()
+        &**value
     }
 
     #[inline]
@@ -309,7 +342,7 @@ impl AttrHelpersForLayout for Attr {
         // This transmute is used to cheat the lifetime restriction.
         let value = mem::transmute::<&AttrValue, &AttrValue>(self.value.borrow_for_layout());
         match *value {
-            AttrValue::TokenList(_, ref tokens) => Some(tokens.as_slice()),
+            AttrValue::TokenList(_, ref tokens) => Some(tokens),
             _ => None,
         }
     }

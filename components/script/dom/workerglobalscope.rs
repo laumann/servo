@@ -8,7 +8,7 @@ use dom::bindings::codegen::InheritTypes::DedicatedWorkerGlobalScopeCast;
 use dom::bindings::error::{ErrorResult, Fallible};
 use dom::bindings::error::Error::{Syntax, Network, JSFailed};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{MutNullableJS, JSRef, Temporary};
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, Temporary};
 use dom::bindings::utils::Reflectable;
 use dom::console::Console;
 use dom::dedicatedworkerglobalscope::{DedicatedWorkerGlobalScope, DedicatedWorkerGlobalScopeHelpers};
@@ -27,14 +27,14 @@ use util::str::DOMString;
 
 use js::jsapi::JSContext;
 use js::jsval::JSVal;
-use js::rust::Cx;
-
-use std::default::Default;
-use std::rc::Rc;
-use std::cell::Cell;
+use js::rust::Runtime;
 use url::{Url, UrlParser};
 
-#[derive(Copy, PartialEq)]
+use std::default::Default;
+use std::cell::Cell;
+use std::rc::Rc;
+
+#[derive(Copy, Clone, PartialEq)]
 #[jstraceable]
 pub enum WorkerGlobalScopeTypeId {
     DedicatedGlobalScope,
@@ -45,12 +45,12 @@ pub enum WorkerGlobalScopeTypeId {
 pub struct WorkerGlobalScope {
     eventtarget: EventTarget,
     worker_url: Url,
-    js_context: Rc<Cx>,
+    runtime: Rc<Runtime>,
     next_worker_id: Cell<WorkerId>,
     resource_task: ResourceTask,
-    location: MutNullableJS<WorkerLocation>,
-    navigator: MutNullableJS<WorkerNavigator>,
-    console: MutNullableJS<Console>,
+    location: MutNullableHeap<JS<WorkerLocation>>,
+    navigator: MutNullableHeap<JS<WorkerNavigator>>,
+    console: MutNullableHeap<JS<Console>>,
     timers: TimerManager,
     devtools_chan: Option<DevtoolsControlChan>,
 }
@@ -58,14 +58,14 @@ pub struct WorkerGlobalScope {
 impl WorkerGlobalScope {
     pub fn new_inherited(type_id: WorkerGlobalScopeTypeId,
                          worker_url: Url,
-                         cx: Rc<Cx>,
+                         runtime: Rc<Runtime>,
                          resource_task: ResourceTask,
                          devtools_chan: Option<DevtoolsControlChan>) -> WorkerGlobalScope {
         WorkerGlobalScope {
             eventtarget: EventTarget::new_inherited(EventTargetTypeId::WorkerGlobalScope(type_id)),
             next_worker_id: Cell::new(WorkerId(0)),
             worker_url: worker_url,
-            js_context: cx,
+            runtime: runtime,
             resource_task: resource_task,
             location: Default::default(),
             navigator: Default::default(),
@@ -85,7 +85,7 @@ impl WorkerGlobalScope {
     }
 
     pub fn get_cx(&self) -> *mut JSContext {
-        self.js_context.ptr
+        self.runtime.cx()
     }
 
     pub fn resource_task<'a>(&'a self) -> &'a ResourceTask {
@@ -122,7 +122,7 @@ impl<'a> WorkerGlobalScopeMethods for JSRef<'a, WorkerGlobalScope> {
         let mut urls = Vec::with_capacity(url_strings.len());
         for url in url_strings.into_iter() {
             let url = UrlParser::new().base_url(&self.worker_url)
-                                      .parse(url.as_slice());
+                                      .parse(&url);
             match url {
                 Ok(url) => urls.push(url),
                 Err(_) => return Err(Syntax),
@@ -137,7 +137,7 @@ impl<'a> WorkerGlobalScopeMethods for JSRef<'a, WorkerGlobalScope> {
                 }
             };
 
-            match self.js_context.evaluate_script(
+            match self.runtime.evaluate_script(
                 self.reflector().get_jsobject(), source, url.serialize(), 1) {
                 Ok(_) => (),
                 Err(_) => {
@@ -263,7 +263,7 @@ impl<'a> WorkerGlobalScopeHelpers for JSRef<'a, WorkerGlobalScope> {
     }
 
     fn get_cx(self) -> *mut JSContext {
-        self.js_context.ptr
+        self.runtime.cx()
     }
 }
 

@@ -18,7 +18,6 @@
 
 extern crate collections;
 extern crate geom;
-extern crate text_writer;
 extern crate url;
 
 #[macro_use]
@@ -28,13 +27,14 @@ extern crate cssparser;
 extern crate matches;
 
 extern crate encoding;
-extern crate "rustc-serialize" as rustc_serialize;
+extern crate rustc_serialize;
 extern crate string_cache;
 extern crate selectors;
 
 #[macro_use]
 extern crate lazy_static;
 
+extern crate num;
 extern crate util;
 
 
@@ -51,6 +51,7 @@ pub mod media_queries;
 pub mod font_face;
 pub mod legacy;
 pub mod animation;
+pub mod viewport;
 
 macro_rules! reexport_computed_values {
     ( $( $name: ident )+ ) => {
@@ -64,4 +65,3 @@ macro_rules! reexport_computed_values {
     }
 }
 longhand_properties_idents!(reexport_computed_values);
-

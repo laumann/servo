@@ -76,26 +76,26 @@ use dom::htmlulistelement::HTMLUListElement;
 use dom::htmlunknownelement::HTMLUnknownElement;
 use dom::htmlvideoelement::HTMLVideoElement;
 
-use util::str::DOMString;
-
-use string_cache::QualName;
+use string_cache::{Atom, QualName};
 
 use std::borrow::ToOwned;
 
-pub fn create_element(name: QualName, prefix: Option<DOMString>,
+pub fn create_element(name: QualName, prefix: Option<Atom>,
                       document: JSRef<Document>, creator: ElementCreator)
                       -> Temporary<Element> {
+    let prefix = prefix.map(|p| (*p).to_owned());
+
     if name.ns != ns!(HTML) {
-        return Element::new(name.local.as_slice().to_owned(), name.ns, prefix, document);
+        return Element::new((*name.local).to_owned(), name.ns, prefix, document);
     }
 
     macro_rules! make(
         ($ctor:ident) => ({
-            let obj = $ctor::new(name.local.as_slice().to_owned(), prefix, document);
+            let obj = $ctor::new((*name.local).to_owned(), prefix, document);
             ElementCast::from_temporary(obj)
         });
         ($ctor:ident, $($arg:expr),+) => ({
-            let obj = $ctor::new(name.local.as_slice().to_owned(), prefix, document, $($arg),+);
+            let obj = $ctor::new((*name.local).to_owned(), prefix, document, $($arg),+);
             ElementCast::from_temporary(obj)
         })
     );

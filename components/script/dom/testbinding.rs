@@ -12,7 +12,7 @@ use dom::bindings::codegen::UnionTypes::EventOrString;
 use dom::bindings::codegen::UnionTypes::EventOrString::eString;
 use dom::bindings::codegen::UnionTypes::HTMLElementOrLong;
 use dom::bindings::codegen::UnionTypes::HTMLElementOrLong::eLong;
-use dom::bindings::global::GlobalField;
+use dom::bindings::global::{GlobalField, GlobalRef};
 use dom::bindings::js::{JSRef, Temporary};
 use dom::bindings::num::Finite;
 use dom::bindings::str::{ByteString, USVString};
@@ -115,6 +115,7 @@ impl<'a> TestBindingMethods for JSRef<'a, TestBinding> {
     fn GetUsvstringAttributeNullable(self) -> Option<USVString> { Some(USVString("".to_owned())) }
     fn SetUsvstringAttributeNullable(self, _: Option<USVString>) {}
     fn SetBinaryRenamedAttribute(self, _: DOMString) {}
+    fn ForwardedAttribute(self) -> Temporary<TestBinding> { Temporary::from_rooted(self) }
     fn BinaryRenamedAttribute(self) -> DOMString { "".to_owned() }
     fn GetEnumAttributeNullable(self) -> Option<TestEnum> { Some(_empty) }
     fn GetInterfaceAttributeNullable(self) -> Option<Temporary<Blob>> {
@@ -361,8 +362,8 @@ impl<'a> TestBindingMethods for JSRef<'a, TestBinding> {
 }
 
 impl TestBinding {
-    pub fn BooleanAttributeStatic() -> bool { false }
-    pub fn SetBooleanAttributeStatic(_: bool) {}
-    pub fn ReceiveVoidStatic() {}
+    pub fn BooleanAttributeStatic(_: GlobalRef) -> bool { false }
+    pub fn SetBooleanAttributeStatic(_: GlobalRef, _: bool) {}
+    pub fn ReceiveVoidStatic(_: GlobalRef) {}
 }
 

@@ -28,7 +28,7 @@ impl TableCaptionFlow {
     pub fn from_node_and_fragment(node: &ThreadSafeLayoutNode, fragment: Fragment)
                                   -> TableCaptionFlow {
         TableCaptionFlow {
-            block_flow: BlockFlow::from_node_and_fragment(node, fragment)
+            block_flow: BlockFlow::from_node_and_fragment(node, fragment, None)
         }
     }
 }
@@ -44,6 +44,10 @@ impl Flow for TableCaptionFlow {
 
     fn as_block<'a>(&'a mut self) -> &'a mut BlockFlow {
         &mut self.block_flow
+    }
+
+    fn as_immutable_block(&self) -> &BlockFlow {
+        &self.block_flow
     }
 
     fn bubble_inline_sizes(&mut self) {
@@ -105,3 +109,4 @@ impl fmt::Debug for TableCaptionFlow {
         write!(f, "TableCaptionFlow: {:?}", self.block_flow)
     }
 }
+

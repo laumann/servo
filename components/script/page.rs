@@ -9,7 +9,6 @@ use dom::node::NodeHelpers;
 use dom::window::Window;
 
 use msg::constellation_msg::PipelineId;
-use util::smallvec::SmallVec;
 use std::cell::Cell;
 use std::rc::Rc;
 use url::Url;
@@ -72,8 +71,12 @@ impl Page {
         }
     }
 
+    pub fn pipeline(&self) -> PipelineId {
+        self.id
+    }
+
     pub fn window(&self) -> Temporary<Window> {
-        Temporary::new(self.frame.borrow().as_ref().unwrap().window.clone())
+        Temporary::from_rooted(self.frame.borrow().as_ref().unwrap().window.clone())
     }
 
     pub fn window_for_script_deallocation(&self) -> Unrooted<Window> {
@@ -81,7 +84,7 @@ impl Page {
     }
 
     pub fn document(&self) -> Temporary<Document> {
-        Temporary::new(self.frame.borrow().as_ref().unwrap().document.clone())
+        Temporary::from_rooted(self.frame.borrow().as_ref().unwrap().document.clone())
     }
 
     // must handle root case separately

@@ -9,39 +9,9 @@
 # Should be == with expected failure:
 fragment=top != ../html/acid2.html acid2_ref.html
 
-== 2dcontext/drawimage_canvas_1.html 2dcontext/drawimage_canvas_1_ref.html
-== 2dcontext/drawimage_canvas_10.html 2dcontext/drawimage_canvas_10_ref.html
-== 2dcontext/drawimage_canvas_11.html 2dcontext/drawimage_canvas_11_ref.html
-== 2dcontext/drawimage_canvas_12.html 2dcontext/drawimage_canvas_12_ref.html
-== 2dcontext/drawimage_canvas_2.html 2dcontext/drawimage_canvas_2_ref.html
-== 2dcontext/drawimage_canvas_3.html 2dcontext/drawimage_canvas_3_ref.html
-== 2dcontext/drawimage_canvas_4.html 2dcontext/drawimage_canvas_4_ref.html
-== 2dcontext/drawimage_canvas_5.html 2dcontext/drawimage_canvas_5_ref.html
-== 2dcontext/drawimage_canvas_6.html 2dcontext/drawimage_canvas_6_ref.html
-== 2dcontext/drawimage_canvas_7.html 2dcontext/drawimage_canvas_7_ref.html
-== 2dcontext/drawimage_canvas_8.html 2dcontext/drawimage_canvas_8_ref.html
-== 2dcontext/drawimage_canvas_9.html 2dcontext/drawimage_canvas_9_ref.html
-== 2dcontext/drawimage_html_image_1.html 2dcontext/drawimage_html_image_1_ref.html
-== 2dcontext/drawimage_html_image_10.html 2dcontext/drawimage_html_image_10_ref.html
-== 2dcontext/drawimage_html_image_11.html 2dcontext/drawimage_html_image_11_ref.html
-== 2dcontext/drawimage_html_image_12.html 2dcontext/drawimage_html_image_12_ref.html
-== 2dcontext/drawimage_html_image_2.html 2dcontext/drawimage_html_image_2_ref.html
-== 2dcontext/drawimage_html_image_3.html 2dcontext/drawimage_html_image_3_ref.html
-== 2dcontext/drawimage_html_image_4.html 2dcontext/drawimage_html_image_4_ref.html
-== 2dcontext/drawimage_html_image_5.html 2dcontext/drawimage_html_image_5_ref.html
-== 2dcontext/drawimage_html_image_6.html 2dcontext/drawimage_html_image_6_ref.html
-== 2dcontext/drawimage_html_image_7.html 2dcontext/drawimage_html_image_7_ref.html
-== 2dcontext/drawimage_html_image_8.html 2dcontext/drawimage_html_image_8_ref.html
-== 2dcontext/drawimage_html_image_9.html 2dcontext/drawimage_html_image_9_ref.html
-
-
 == 2dcontext/lineto_a.html 2dcontext/lineto_ref.html
 == 2dcontext/transform_a.html 2dcontext/transform_ref.html
 
-== abs_float_pref_width_a.html abs_float_pref_width_ref.html
-== absolute_clipping_of_own_contents_a.html absolute_clipping_of_own_contents_ref.html
-== absolute_content_height_a.html absolute_content_height_ref.html
-== absolute_hypothetical_float_a.html absolute_hypothetical_float_ref.html
 == acid1_a.html acid1_b.html
 == acid2_noscroll.html acid2_ref_broken.html
 == after_block_iteration.html after_block_iteration_ref.html
@@ -70,6 +40,7 @@ flaky_cpu == append_style_a.html append_style_b.html
 == block_formatting_context_cleared_float_a.html block_formatting_context_cleared_float_ref.html
 == block_formatting_context_complex_a.html block_formatting_context_complex_ref.html
 == block_formatting_context_containing_floats_a.html block_formatting_context_containing_floats_ref.html
+== block_formatting_context_float_placement_a.html block_formatting_context_float_placement_ref.html
 == block_formatting_context_relative_a.html block_formatting_context_ref.html
 == block_formatting_context_translation_a.html block_formatting_context_translation_ref.html
 == block_image.html 500x300_green.html
@@ -81,10 +52,13 @@ flaky_cpu == append_style_a.html append_style_b.html
 != border_black_ridge.html border_black_groove.html
 != border_black_ridge.html border_black_solid.html
 == border_code_tag.html border_code_tag_ref.html
+== border_collapse_missing_cell_a.html border_collapse_missing_cell_ref.html
+== border_collapse_simple_a.html border_collapse_simple_ref.html
 == border_radius_clip_a.html border_radius_clip_ref.html
 == border_radius_overlapping_a.html border_radius_overlapping_ref.html
 == border_spacing_a.html border_spacing_ref.html
 == border_spacing_auto_layout_a.html border_spacing_ref.html
+== border_spacing_empty_table.html border_spacing_empty_table_ref.html
 == border_spacing_fixed_layout_a.html border_spacing_ref.html
 == border_style_none_a.html border_style_none_b.html
 == borders_a.html borders_b.html
@@ -115,8 +89,10 @@ flaky_cpu == append_style_a.html append_style_b.html
 == first_of_type_pseudo_a.html first_of_type_pseudo_b.html
 == fixed_width_overrides_child_intrinsic_width_a.html fixed_width_overrides_child_intrinsic_width_ref.html
 == float_clearance_a.html float_clearance_ref.html
+== float_clearance_intrinsic_width_a.html float_clearance_intrinsic_width_ref.html
 == float_intrinsic_height.html float_intrinsic_height_ref.html
 == float_intrinsic_width_a.html float_intrinsic_width_ref.html
+== float_overflow_area_a.html float_overflow_area_ref.html
 == float_right_intrinsic_width_a.html float_right_intrinsic_width_ref.html
 == float_table_a.html float_table_ref.html
 == float_under_top_margin_a.html float_under_top_margin_ref.html
@@ -156,11 +132,14 @@ flaky_cpu == append_style_a.html append_style_b.html
 == img_dynamic_remove.html img_dynamic_remove_ref.html
 != img_simple.html img_simple_ref.html
 == img_size_a.html img_size_b.html
+== img_width_attribute_intrinsic_width_a.html img_width_attribute_intrinsic_width_ref.html
 == incremental_float_a.html incremental_float_ref.html
 == incremental_inline_layout_a.html incremental_inline_layout_ref.html
 != inline_background_a.html inline_background_ref.html
 == inline_block_baseline_a.html inline_block_baseline_ref.html
+== inline_block_block_direction_margins_a.html inline_block_block_direction_margins_ref.html
 == inline_block_border_a.html inline_block_border_ref.html
+== inline_block_border_intrinsic_size_a.html inline_block_border_intrinsic_size_ref.html
 == inline_block_img_a.html inline_block_img_ref.html
 == inline_block_margin_a.html inline_block_margin_ref.html
 == inline_block_min_width.html inline_block_min_width_ref.html
@@ -175,10 +154,13 @@ flaky_cpu == append_style_a.html append_style_b.html
 # inline_border_a.html inline_border_b.html
 == inline_element_border_a.html inline_element_border_ref.html
 == inline_hypothetical_box_a.html inline_hypothetical_box_ref.html
+== inline_margin_multiple_fragments_a.html inline_margin_multiple_fragments_ref.html
+== inline_margins_a.html inline_margins_ref.html
 == inline_padding_a.html inline_padding_b.html
 # inline_text_align_a.html inline_text_align_b.html
 == inline_whitespace_a.html inline_whitespace_ref.html
 == inline_whitespace_b.html inline_whitespace_ref.html
+== input_button_size_a.html input_button_size_ref.html
 != input_height_a.html input_height_ref.html
 == inset.html inset_ref.html
 != inset_blackborder.html blackborder_ref.html
@@ -270,6 +252,7 @@ experimental != overconstrained_block.html overconstrained_block_ref.html
 == position_fixed_tile_edge_2.html position_fixed_tile_edge_ref.html
 == position_fixed_tile_edge_3.html position_fixed_tile_edge_ref.html
 == position_relative_a.html position_relative_b.html
+== position_relative_painting_order_a.html position_relative_painting_order_ref.html
 == position_relative_top_percentage_a.html position_relative_top_percentage_b.html
 == pre_ignorable_whitespace_a.html pre_ignorable_whitespace_ref.html
 == pre_with_tab.html pre_with_tab_ref.html
@@ -281,22 +264,30 @@ experimental != overconstrained_block.html overconstrained_block_ref.html
 == root_pseudo_a.html root_pseudo_b.html
 experimental == rtl_body.html rtl_body_ref.html
 experimental == rtl_simple.html rtl_simple_ref.html
+== servo_center_a.html servo_center_ref.html
 == setattribute_id_restyle_a.html setattribute_id_restyle_b.html
 == stacking_context_overflow_a.html stacking_context_overflow_ref.html
 == stacking_context_overflow_relative_outline_a.html stacking_context_overflow_relative_outline_ref.html
 == table_auto_width.html table_auto_width_ref.html
 == table_caption_bottom_a.html table_caption_bottom_ref.html
 == table_caption_top_a.html table_caption_top_ref.html
+== table_cell_float_a.html table_cell_float_ref.html
 == table_colspan_fixed_a.html table_colspan_fixed_ref.html
 == table_colspan_simple_a.html table_colspan_simple_ref.html
 == table_containing_block_a.html table_containing_block_ref.html
 == table_expansion_to_fit_a.html table_expansion_to_fit_ref.html
 == table_float_translation_a.html table_float_translation_ref.html
+== table_intrinsic_style_specified_width_a.html table_intrinsic_style_specified_width_ref.html
+== table_margin_auto_a.html table_margin_auto_ref.html
 == table_padding_a.html table_padding_ref.html
 == table_percentage_capping_a.html table_percentage_capping_ref.html
 == table_percentage_width_a.html table_percentage_width_ref.html
+experimental == table_row_direction_a.html table_row_direction_ref.html
+== table_width_attribute_a.html table_width_attribute_ref.html
 == text_align_complex_a.html text_align_complex_ref.html
 == text_align_justify_a.html text_align_justify_ref.html
+experimental == text_align_rtl.html text_align_rtl_ref.html
+experimental == text_align_start_end.html text_align_start_end_ref.html
 == text_decoration_cached.html text_decoration_cached_ref.html
 # text_decoration_propagation_a.html text_decoration_propagation_b.html
 != text_decoration_smoke_a.html text_decoration_smoke_ref.html
@@ -316,6 +307,7 @@ experimental == rtl_simple.html rtl_simple_ref.html
 == upper_id_attr.html upper_id_attr_ref.html
 flaky_cpu,experimental == vertical-lr-blocks.html vertical-lr-blocks_ref.html
 == vertical_align_bottom_a.html vertical_align_bottom_ref.html
+== vertical_align_inline_block_a.html vertical_align_inline_block_ref.html
 == vertical_align_inside_table_a.html vertical_align_inside_table_ref.html
 == vertical_align_sub_a.html vertical_align_sub_ref.html
 == vertical_align_super_a.html vertical_align_super_ref.html
@@ -329,6 +321,7 @@ resolution=800x600 == viewport_percentage_vmin_vmax.html viewport_percentage_vmi
 resolution=600x800 == viewport_percentage_vmin_vmax.html viewport_percentage_vmin_vmax_b.html
 resolution=800x600 == viewport_percentage_vw_vh.html viewport_percentage_vw_vh_a.html
 resolution=600x800 == viewport_percentage_vw_vh.html viewport_percentage_vw_vh_b.html
+experimental == viewport_rule.html viewport_rule_ref.html
 == visibility_hidden.html visibility_hidden_ref.html
 
 flaky_cpu == webgl-context/clearcolor.html webgl-context/clearcolor_ref.html

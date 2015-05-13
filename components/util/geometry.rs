@@ -10,7 +10,6 @@ use geom::num::Zero;
 
 use std::default::Default;
 use std::i32;
-use std::num::{Float, NumCast, ToPrimitive};
 use std::fmt;
 use std::ops::{Add, Sub, Neg, Mul, Div, Rem};
 
@@ -31,7 +30,7 @@ use rustc_serialize::{Encoder, Encodable};
 ///
 /// The ratio between ScreenPx and DevicePixel for a given display be found by calling
 /// `servo::windowing::WindowMethods::hidpi_factor`.
-#[derive(Debug, Copy)]
+#[derive(Debug, Copy, Clone)]
 pub enum ScreenPx {}
 
 /// One CSS "px" in the coordinate system of the "initial viewport":
@@ -43,7 +42,7 @@ pub enum ScreenPx {}
 ///
 /// At the default zoom level of 100%, one PagePx is equal to one ScreenPx.  However, if the
 /// document is zoomed in or out then this scale may be larger or smaller.
-#[derive(RustcEncodable, Debug, Copy)]
+#[derive(RustcEncodable, Debug, Copy, Clone)]
 pub enum ViewportPx {}
 
 /// One CSS "px" in the root coordinate system for the content document.
@@ -52,7 +51,7 @@ pub enum ViewportPx {}
 /// This is the mobile-style "pinch zoom" that enlarges content without reflowing it.  When the
 /// viewport zoom is not equal to 1.0, then the layout viewport is no longer the same physical size
 /// as the viewable area.
-#[derive(RustcEncodable, Debug, Copy)]
+#[derive(RustcEncodable, Debug, Copy, Clone)]
 pub enum PagePx {}
 
 // In summary, the hierarchy of pixel units and the factors to convert from one to the next:
@@ -116,13 +115,13 @@ pub const MAX_AU: Au = Au(i32::MAX);
 
 impl Encodable for Au {
     fn encode<S: Encoder>(&self, e: &mut S) -> Result<(), S::Error> {
-        e.emit_f64(to_frac_px(*self))
+        e.emit_f64(self.to_f64_px())
     }
 }
 
 impl fmt::Debug for Au {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}px", to_frac_px(*self))
+        write!(f, "{}px", self.to_f64_px())
     }}
 
 impl Add for Au {
@@ -130,9 +129,7 @@ impl Add for Au {
 
     #[inline]
     fn add(self, other: Au) -> Au {
-        let Au(s) = self;
-        let Au(o) = other;
-        Au(s.wrapping_add(o))
+        Au(self.0.wrapping_add(other.0))
     }
 }
 
@@ -141,9 +138,7 @@ impl Sub for Au {
 
     #[inline]
     fn sub(self, other: Au) -> Au {
-        let Au(s) = self;
-        let Au(o) = other;
-        Au(s.wrapping_sub(o))
+        Au(self.0.wrapping_sub(other.0))
     }
 
 }
@@ -153,8 +148,7 @@ impl Mul<i32> for Au {
 
     #[inline]
     fn mul(self, other: i32) -> Au {
-        let Au(s) = self;
-        Au(s.wrapping_mul(other))
+        Au(self.0.wrapping_mul(other))
     }
 }
 
@@ -163,8 +157,7 @@ impl Div<i32> for Au {
 
     #[inline]
     fn div(self, other: i32) -> Au {
-        let Au(s) = self;
-        Au(s / other)
+        Au(self.0 / other)
     }
 }
 
@@ -173,8 +166,7 @@ impl Rem<i32> for Au {
 
     #[inline]
     fn rem(self, other: i32) -> Au {
-        let Au(s) = self;
-        Au(s % other)
+        Au(self.0 % other)
     }
 }
 
@@ -183,42 +175,7 @@ impl Neg for Au {
 
     #[inline]
     fn neg(self) -> Au {
-        let Au(s) = self;
-        Au(-s)
-    }
-}
-
-
-impl NumCast for Au {
-    #[inline]
-    fn from<T:ToPrimitive>(n: T) -> Option<Au> {
-        Some(Au(n.to_i32().unwrap()))
-    }
-}
-
-impl ToPrimitive for Au {
-    #[inline]
-    fn to_i64(&self) -> Option<i64> {
-        let Au(s) = *self;
-        Some(s as i64)
-    }
-
-    #[inline]
-    fn to_u64(&self) -> Option<u64> {
-        let Au(s) = *self;
-        Some(s as u64)
-    }
-
-    #[inline]
-    fn to_f32(&self) -> Option<f32> {
-        let Au(s) = *self;
-        s.to_f32()
-    }
-
-    #[inline]
-    fn to_f64(&self) -> Option<f64> {
-        let Au(s) = *self;
-        s.to_f64()
+        Au(-self.0)
     }
 }
 
@@ -230,114 +187,84 @@ impl Au {
     }
 
     #[inline]
-    pub fn scale_by(self, factor: f64) -> Au {
-        let Au(s) = self;
-        Au(((s as f64) * factor) as i32)
+    pub fn scale_by(self, factor: f32) -> Au {
+        Au(((self.0 as f32) * factor) as i32)
     }
 
     #[inline]
-    pub fn from_px(px: isize) -> Au {
-        NumCast::from(px * 60).unwrap()
+    pub fn from_px(px: i32) -> Au {
+        Au((px * 60) as i32)
     }
 
     #[inline]
     pub fn from_page_px(px: Length<PagePx, f32>) -> Au {
-        NumCast::from(px.get() * 60f32).unwrap()
+        Au((px.get() * 60f32) as i32)
+    }
+
+    /// Rounds this app unit down to the pixel towards zero and returns it.
+    #[inline]
+    pub fn to_px(self) -> i32 {
+        self.0 / 60
+    }
+
+    /// Rounds this app unit down to the previous (left or top) pixel and returns it.
+    #[inline]
+    pub fn to_prev_px(self) -> i32 {
+        ((self.0 as f64) / 60f64).floor() as i32
+    }
+
+    /// Rounds this app unit up to the next (right or bottom) pixel and returns it.
+    #[inline]
+    pub fn to_next_px(self) -> i32 {
+        ((self.0 as f64) / 60f64).ceil() as i32
     }
 
     #[inline]
-    pub fn to_nearest_px(&self) -> isize {
-        let Au(s) = *self;
-        ((s as f64) / 60f64).round() as isize
+    pub fn to_nearest_px(self) -> i32 {
+        ((self.0 as f64) / 60f64).round() as i32
     }
 
     #[inline]
-    pub fn to_frac32_px(&self) -> f32 {
-        let Au(s) = *self;
-        (s as f32) / 60f32
+    pub fn to_f32_px(self) -> f32 {
+        (self.0 as f32) / 60f32
     }
 
     #[inline]
-    pub fn to_subpx(&self) -> f64 {
-        let Au(s) = *self;
-        (s as f64) / 60f64
+    pub fn to_f64_px(self) -> f64 {
+        (self.0 as f64) / 60f64
     }
 
     #[inline]
-    pub fn to_snapped(&self) -> Au {
-        let Au(s) = *self;
-        let res = s % 60i32;
-        return if res >= 30i32 { return Au(s - res + 60i32) }
-                       else { return Au(s - res) };
+    pub fn to_snapped(self) -> Au {
+        let res = self.0 % 60i32;
+        return if res >= 30i32 { return Au(self.0 - res + 60i32) }
+                       else { return Au(self.0 - res) };
     }
 
     #[inline]
-    pub fn from_frac32_px(px: f32) -> Au {
+    pub fn from_f32_px(px: f32) -> Au {
         Au((px * 60f32) as i32)
     }
 
     #[inline]
     pub fn from_pt(pt: f64) -> Au {
-        from_frac_px(pt_to_px(pt))
+        Au::from_f64_px(pt_to_px(pt))
     }
 
     #[inline]
-    pub fn from_frac_px(px: f64) -> Au {
-        Au((px * 60f64) as i32)
-    }
-
-    #[inline]
-    pub fn min(x: Au, y: Au) -> Au {
-        let Au(xi) = x;
-        let Au(yi) = y;
-        if xi < yi { x } else { y }
-    }
-
-    #[inline]
-    pub fn max(x: Au, y: Au) -> Au {
-        let Au(xi) = x;
-        let Au(yi) = y;
-        if xi > yi { x } else { y }
+    pub fn from_f64_px(px: f64) -> Au {
+        Au((px * 60.) as i32)
     }
 }
 
 // assumes 72 points per inch, and 96 px per inch
 pub fn pt_to_px(pt: f64) -> f64 {
-    pt / 72f64 * 96f64
+    pt / 72. * 96.
 }
 
 // assumes 72 points per inch, and 96 px per inch
 pub fn px_to_pt(px: f64) -> f64 {
-    px / 96f64 * 72f64
-}
-
-pub fn from_frac_px(px: f64) -> Au {
-    Au((px * 60f64) as i32)
-}
-
-pub fn from_px(px: isize) -> Au {
-    NumCast::from(px * 60).unwrap()
-}
-
-pub fn to_px(au: Au) -> isize {
-    let Au(a) = au;
-    (a / 60) as isize
-}
-
-pub fn to_frac_px(au: Au) -> f64 {
-    let Au(a) = au;
-    (a as f64) / 60f64
-}
-
-// assumes 72 points per inch, and 96 px per inch
-pub fn from_pt(pt: f64) -> Au {
-    from_px((pt / 72f64 * 96f64) as isize)
-}
-
-// assumes 72 points per inch, and 96 px per inch
-pub fn to_pt(au: Au) -> f64 {
-    let Au(a) = au;
-    (a as f64) / 60f64 * 72f64 / 96f64
+    px / 96. * 72.
 }
 
 /// Returns true if the rect contains the given point. Points on the top or left sides of the rect
@@ -350,7 +277,7 @@ pub fn rect_contains_point<T:PartialOrd + Add<T, Output=T>>(rect: Rect<T>, point
 
 /// A helper function to convert a rect of `f32` pixels to a rect of app units.
 pub fn f32_rect_to_au_rect(rect: Rect<f32>) -> Rect<Au> {
-    Rect(Point2D(Au::from_frac32_px(rect.origin.x), Au::from_frac32_px(rect.origin.y)),
-         Size2D(Au::from_frac32_px(rect.size.width), Au::from_frac32_px(rect.size.height)))
+    Rect(Point2D(Au::from_f32_px(rect.origin.x), Au::from_f32_px(rect.origin.y)),
+         Size2D(Au::from_f32_px(rect.size.width), Au::from_f32_px(rect.size.height)))
 }
 

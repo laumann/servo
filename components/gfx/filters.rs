@@ -10,7 +10,6 @@ use azure::azure_hl::{FilterNode, FilterType, LinearTransferAttribute, LinearTra
 use azure::azure_hl::{Matrix5x4, TableTransferAttribute, TableTransferInput};
 use azure::azure_hl::{GaussianBlurAttribute, GaussianBlurInput};
 
-use std::num::Float;
 use style::computed_values::filter;
 use util::geometry::Au;
 
@@ -96,7 +95,7 @@ pub fn create_filters(draw_target: &DrawTarget,
             }
             filter::Filter::Blur(amount) => {
                 *accumulated_blur_radius = accumulated_blur_radius.clone() + amount;
-                let amount = amount.to_frac32_px();
+                let amount = amount.to_f32_px();
                 let blur = draw_target.create_filter(FilterType::GaussianBlur);
                 blur.set_attribute(GaussianBlurAttribute::StdDeviation(amount));
                 blur.set_input(GaussianBlurInput, &filter);

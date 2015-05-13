@@ -4,6 +4,7 @@
 
 #![allow(unsafe_code, unrooted_must_root)]
 
+use document_loader::{DocumentLoader, LoadType};
 use dom::attr::AttrHelpers;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -11,10 +12,10 @@ use dom::bindings::codegen::InheritTypes::{CharacterDataCast, DocumentTypeCast};
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLScriptElementCast};
 use dom::bindings::codegen::InheritTypes::{HTMLFormElementDerived, NodeCast};
 use dom::bindings::codegen::InheritTypes::ProcessingInstructionCast;
-use dom::bindings::js::{JS, JSRef, Temporary, OptionalRootable, Root};
-use dom::bindings::js::RootedReference;
+use dom::bindings::js::{JS, JSRef, OptionalRootable, Root, Rootable};
+use dom::bindings::js::{RootedReference, Temporary};
 use dom::bindings::trace::RootedVec;
-use dom::characterdata::CharacterDataHelpers;
+use dom::characterdata::{CharacterDataHelpers, CharacterDataTypeId};
 use dom::comment::Comment;
 use dom::document::{Document, DocumentHelpers};
 use dom::document::{DocumentSource, IsHTMLDocument};
@@ -39,13 +40,13 @@ use util::str::DOMString;
 use util::task_state;
 use util::task_state::IN_HTML_PARSER;
 use std::borrow::Cow;
-use std::old_io::{Writer, IoResult};
+use std::io::{self, Write};
 use url::Url;
 use html5ever::Attribute;
 use html5ever::serialize::{Serializable, Serializer, AttrRef};
 use html5ever::serialize::TraversalScope;
 use html5ever::serialize::TraversalScope::{IncludeNode, ChildrenOnly};
-use html5ever::tree_builder::{TreeSink, QuirksMode, NodeOrText, AppendNode, AppendText};
+use html5ever::tree_builder::{TreeSink, QuirksMode, NodeOrText, AppendNode, AppendText, NextParserState};
 use string_cache::QualName;
 
 use hyper::header::ContentType;
@@ -63,7 +64,7 @@ trait SinkHelpers {
 impl SinkHelpers for servohtmlparser::Sink {
     fn get_or_create(&self, child: NodeOrText<JS<Node>>) -> Temporary<Node> {
         match child {
-            AppendNode(n) => Temporary::new(n),
+            AppendNode(n) => Temporary::from_rooted(n),
             AppendText(t) => {
                 let doc = self.document.root();
                 let text = Text::new(t, doc.r());
@@ -121,7 +122,7 @@ impl<'a> TreeSink for servohtmlparser::Sink {
             new_node: NodeOrText<JS<Node>>) -> Result<(), NodeOrText<JS<Node>>> {
         // If there is no parent, return the node to the parser.
         let sibling: Root<Node> = sibling.root();
-        let parent = match sibling.r().parent_node() {
+        let parent = match sibling.r().GetParentNode() {
             Some(p) => p.root(),
             None => return Err(new_node),
         };
@@ -179,10 +180,11 @@ impl<'a> TreeSink for servohtmlparser::Sink {
         script.map(|script| script.mark_already_started());
     }
 
-    fn complete_script(&mut self, node: JS<Node>) {
+    fn complete_script(&mut self, node: JS<Node>) -> NextParserState {
         let node: Root<Node> = node.root();
         let script: Option<JSRef<HTMLScriptElement>> = HTMLScriptElementCast::to_ref(node.r());
         script.map(|script| script.prepare());
+        NextParserState::Continue
     }
 
     fn reparent_children(&mut self, node: JS<Node>, new_parent: JS<Node>) {
@@ -198,8 +200,8 @@ impl<'a> TreeSink for servohtmlparser::Sink {
 }
 
 impl<'a> Serializable for JSRef<'a, Node> {
-    fn serialize<'wr, Wr: Writer>(&self, serializer: &mut Serializer<'wr, Wr>,
-                                  traversal_scope: TraversalScope) -> IoResult<()> {
+    fn serialize<'wr, Wr: Write>(&self, serializer: &mut Serializer<'wr, Wr>,
+                                 traversal_scope: TraversalScope) -> io::Result<()> {
         let node = *self;
         match (traversal_scope, node.type_id()) {
             (_, NodeTypeId::Element(..)) => {
@@ -215,7 +217,7 @@ impl<'a> Serializable for JSRef<'a, Node> {
                         (qname, value)
                     }).collect::<Vec<_>>();
                     let attr_refs = attrs.iter().map(|&(ref qname, ref value)| {
-                        let ar: AttrRef = (&qname, value.as_slice());
+                        let ar: AttrRef = (&qname, &**value);
                         ar
                     });
                     try!(serializer.start_elem(name.clone(), attr_refs));
@@ -244,20 +246,20 @@ impl<'a> Serializable for JSRef<'a, Node> {
 
             (IncludeNode, NodeTypeId::DocumentType) => {
                 let doctype: JSRef<DocumentType> = DocumentTypeCast::to_ref(node).unwrap();
-                serializer.write_doctype(doctype.name().as_slice())
+                serializer.write_doctype(&doctype.name())
             },
 
-            (IncludeNode, NodeTypeId::Text) => {
+            (IncludeNode, NodeTypeId::CharacterData(CharacterDataTypeId::Text)) => {
                 let cdata = CharacterDataCast::to_ref(node).unwrap();
                 serializer.write_text(&cdata.data())
             },
 
-            (IncludeNode, NodeTypeId::Comment) => {
+            (IncludeNode, NodeTypeId::CharacterData(CharacterDataTypeId::Comment)) => {
                 let cdata = CharacterDataCast::to_ref(node).unwrap();
                 serializer.write_comment(&cdata.data())
             },
 
-            (IncludeNode, NodeTypeId::ProcessingInstruction) => {
+            (IncludeNode, NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction)) => {
                 let pi: JSRef<ProcessingInstruction> = ProcessingInstructionCast::to_ref(node).unwrap();
                 let data = CharacterDataCast::from_ref(pi).data();
                 serializer.write_processing_instruction(&pi.target(), &data)
@@ -285,12 +287,12 @@ pub fn parse_html(document: JSRef<Document>,
         task_state::enter(IN_HTML_PARSER);
     }
 
-    fn parse_progress(parser: JSRef<ServoHTMLParser>, url: &Url, load_response: &LoadResponse) {
+    fn parse_progress(document: JSRef<Document>, parser: JSRef<ServoHTMLParser>, url: &Url, load_response: &LoadResponse) {
         for msg in load_response.progress_port.iter() {
             match msg {
                 ProgressMsg::Payload(data) => {
                     // FIXME: use Vec<u8> (html5ever #34)
-                    let data = UTF_8.decode(data.as_slice(), DecoderTrap::Replace).unwrap();
+                    let data = UTF_8.decode(&data, DecoderTrap::Replace).unwrap();
                     parser.parse_chunk(data);
                 }
                 ProgressMsg::Done(Err(err)) => {
@@ -298,7 +300,10 @@ pub fn parse_html(document: JSRef<Document>,
                     // TODO(Savago): we should send a notification to callers #5463.
                     break;
                 }
-                ProgressMsg::Done(Ok(())) => break,
+                ProgressMsg::Done(Ok(())) => {
+                    document.finish_load(LoadType::PageSource(url.clone()));
+                    break;
+                }
             }
         }
     };
@@ -312,6 +317,7 @@ pub fn parse_html(document: JSRef<Document>,
                 Some(ContentType(Mime(TopLevel::Image, _, _))) => {
                     let page = format!("<html><body><img src='{}' /></body></html>", url.serialize());
                     parser.parse_chunk(page);
+                    document.finish_load(LoadType::PageSource(url.clone()));
                 },
                 Some(ContentType(Mime(TopLevel::Text, SubLevel::Plain, _))) => {
                     // FIXME: When servo/html5ever#109 is fixed remove <plaintext> usage and
@@ -324,10 +330,10 @@ pub fn parse_html(document: JSRef<Document>,
                     // https://html.spec.whatwg.org/multipage/#read-text
                     let page = format!("<pre>\u{000A}<plaintext>");
                     parser.parse_chunk(page);
-                    parse_progress(parser, url, &load_response);
+                    parse_progress(document, parser, url, &load_response);
                 },
                 _ => {
-                    parse_progress(parser, url, &load_response);
+                    parse_progress(document, parser, url, &load_response);
                 }
             }
         }
@@ -348,16 +354,19 @@ pub fn parse_html_fragment(context_node: JSRef<Node>,
                            output: &mut RootedVec<JS<Node>>) {
     let window = window_from_node(context_node).root();
     let context_document = document_from_node(context_node).root();
-    let url = context_document.r().url();
+    let context_document = context_document.r();
+    let url = context_document.url();
 
     // Step 1.
+    let loader = DocumentLoader::new(&*context_document.loader());
     let document = Document::new(window.r(), Some(url.clone()),
                                  IsHTMLDocument::HTMLDocument,
                                  None, None,
-                                 DocumentSource::FromParser).root();
+                                 DocumentSource::FromParser,
+                                 loader).root();
 
     // Step 2.
-    document.r().set_quirks_mode(context_document.r().quirks_mode());
+    document.r().set_quirks_mode(context_document.quirks_mode());
 
     // Step 11.
     let form = context_node.inclusive_ancestors()

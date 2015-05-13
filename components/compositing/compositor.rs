@@ -24,24 +24,25 @@ use layers::layers::{BufferRequest, Layer, LayerBuffer, LayerBufferSet};
 use layers::rendergl::RenderContext;
 use layers::rendergl;
 use layers::scene::Scene;
-use msg::compositor_msg::{Epoch, LayerId};
+use msg::compositor_msg::{Epoch, FrameTreeId, LayerId};
 use msg::compositor_msg::{ReadyState, PaintState, ScrollPolicy};
+use msg::constellation_msg::AnimationState;
 use msg::constellation_msg::Msg as ConstellationMsg;
 use msg::constellation_msg::{ConstellationChan, NavigationDirection};
 use msg::constellation_msg::{Key, KeyModifiers, KeyState, LoadData};
 use msg::constellation_msg::{PipelineId, WindowSizeData};
 use png;
-use profile::mem;
-use profile::time::{self, ProfilerCategory, profile};
+use profile_traits::mem;
+use profile_traits::time::{self, ProfilerCategory, profile};
 use script_traits::{ConstellationControlMsg, ScriptControlChan};
 use std::cmp;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::mem as std_mem;
-use std::num::Float;
 use std::rc::Rc;
 use std::slice::bytes::copy_memory;
 use std::sync::mpsc::Sender;
+use style::viewport::ViewportConstraints;
 use time::{precise_time_ns, precise_time_s};
 use url::Url;
 use util::geometry::{PagePx, ScreenPx, ViewportPx};
@@ -74,6 +75,10 @@ pub struct IOCompositor<Window: WindowMethods> {
     /// "Mobile-style" zoom that does not reflow the page.
     viewport_zoom: ScaleFactor<PagePx, ViewportPx, f32>,
 
+    /// Viewport zoom constraints provided by @viewport.
+    min_viewport_zoom: Option<ScaleFactor<PagePx, ViewportPx, f32>>,
+    max_viewport_zoom: Option<ScaleFactor<PagePx, ViewportPx, f32>>,
+
     /// "Desktop-style" zoom that resizes the viewport to fit the window.
     /// See `ViewportPx` docs in util/geom.rs for details.
     page_zoom: ScaleFactor<ViewportPx, ScreenPx, f32>,
@@ -85,6 +90,9 @@ pub struct IOCompositor<Window: WindowMethods> {
 
     /// A handle to the scrolling timer.
     scrolling_timer: ScrollingTimerProxy,
+
+    /// The type of composition to perform
+    composite_target: CompositeTarget,
 
     /// Tracks whether we should composite this frame.
     composition_request: CompositionRequest,
@@ -110,8 +118,8 @@ pub struct IOCompositor<Window: WindowMethods> {
     /// many times for a single page.
     got_load_complete_message: bool,
 
-    /// Whether we have received a `SetFrameTree` message.
-    got_set_frame_tree_message: bool,
+    /// The current frame tree ID (used to reject old paint buffers)
+    frame_tree_id: FrameTreeId,
 
     /// The channel on which messages can be sent to the constellation.
     constellation_chan: ConstellationChan,
@@ -144,7 +152,7 @@ enum CompositionRequest {
     CompositeNow(CompositingReason),
 }
 
-#[derive(Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ShutdownState {
     NotShuttingDown,
     ShuttingDown,
@@ -166,8 +174,11 @@ struct PipelineDetails {
     /// The status of this pipeline's PaintTask.
     paint_state: PaintState,
 
-    /// Whether animations are running.
+    /// Whether animations are running
     animations_running: bool,
+
+    /// Whether there are animation callbacks
+    animation_callbacks_running: bool,
 }
 
 impl PipelineDetails {
@@ -177,8 +188,41 @@ impl PipelineDetails {
             ready_state: ReadyState::Blank,
             paint_state: PaintState::Painting,
             animations_running: false,
+            animation_callbacks_running: false,
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CompositeTarget {
+    /// Normal composition to a window
+    Window,
+
+    /// Compose as normal, but also return a PNG of the composed output
+    WindowAndPng,
+
+    /// Compose to a PNG, write it to disk, and then exit the browser (used for reftests)
+    PngFile
+}
+
+fn initialize_png(width: usize, height: usize) -> (Vec<gl::GLuint>, Vec<gl::GLuint>) {
+    let framebuffer_ids = gl::gen_framebuffers(1);
+    gl::bind_framebuffer(gl::FRAMEBUFFER, framebuffer_ids[0]);
+
+    let texture_ids = gl::gen_textures(1);
+    gl::bind_texture(gl::TEXTURE_2D, texture_ids[0]);
+
+    gl::tex_image_2d(gl::TEXTURE_2D, 0, gl::RGB as GLint, width as GLsizei,
+                     height as GLsizei, 0, gl::RGB, gl::UNSIGNED_BYTE, None);
+    gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
+    gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
+
+    gl::framebuffer_texture_2d(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D,
+                               texture_ids[0], 0);
+
+    gl::bind_texture(gl::TEXTURE_2D, 0);
+
+    (framebuffer_ids, texture_ids)
 }
 
 impl<Window: WindowMethods> IOCompositor<Window> {
@@ -195,6 +239,10 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         // display list. This is only here because we don't have that logic in the painter yet.
         let window_size = window.framebuffer_size();
         let hidpi_factor = window.hidpi_factor();
+        let composite_target = match opts::get().output_file {
+            Some(_) => CompositeTarget::PngFile,
+            None => CompositeTarget::Window
+        };
         IOCompositor {
             window: window,
             port: receiver,
@@ -211,13 +259,16 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             scrolling_timer: ScrollingTimerProxy::new(sender),
             composition_request: CompositionRequest::NoCompositingNecessary,
             pending_scroll_events: Vec::new(),
+            composite_target: composite_target,
             shutdown_state: ShutdownState::NotShuttingDown,
             page_zoom: ScaleFactor::new(1.0),
             viewport_zoom: ScaleFactor::new(1.0),
+            min_viewport_zoom: None,
+            max_viewport_zoom: None,
             zoom_action: false,
             zoom_time: 0f64,
             got_load_complete_message: false,
-            got_set_frame_tree_message: false,
+            frame_tree_id: FrameTreeId(0),
             constellation_chan: constellation_chan,
             time_profiler_chan: time_profiler_chan,
             mem_profiler_chan: mem_profiler_chan,
@@ -278,9 +329,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.change_paint_state(pipeline_id, paint_state);
             }
 
-            (Msg::ChangeRunningAnimationsState(pipeline_id, running_animations),
+            (Msg::ChangeRunningAnimationsState(pipeline_id, animation_state),
              ShutdownState::NotShuttingDown) => {
-                self.change_running_animations_state(pipeline_id, running_animations);
+                self.change_running_animations_state(pipeline_id, animation_state);
             }
 
             (Msg::ChangePageTitle(pipeline_id, title), ShutdownState::NotShuttingDown) => {
@@ -320,13 +371,14 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.set_layer_rect(pipeline_id, layer_id, &rect);
             }
 
-            (Msg::AssignPaintedBuffers(pipeline_id, epoch, replies),
+            (Msg::AssignPaintedBuffers(pipeline_id, epoch, replies, frame_tree_id),
              ShutdownState::NotShuttingDown) => {
                 for (layer_id, new_layer_buffer_set) in replies.into_iter() {
                     self.assign_painted_buffers(pipeline_id,
                                                 layer_id,
                                                 new_layer_buffer_set,
-                                                epoch);
+                                                epoch,
+                                                frame_tree_id);
                 }
                 self.remove_outstanding_paint_msg();
             }
@@ -378,11 +430,20 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.window.set_cursor(cursor)
             }
 
+            (Msg::CreatePng(reply), ShutdownState::NotShuttingDown) => {
+                let img = self.composite_specific_target(CompositeTarget::WindowAndPng);
+                reply.send(img).unwrap();
+            }
+
             (Msg::PaintTaskExited(pipeline_id), ShutdownState::NotShuttingDown) => {
                 match self.pipeline_details.remove(&pipeline_id) {
                     Some(details) => { details.pipeline.map(|p| p.close()); }
                     None => panic!("Saw PaintTaskExited message from an unknown pipeline!")
                 }
+            }
+
+            (Msg::ViewportConstrained(pipeline_id, constraints), ShutdownState::NotShuttingDown) => {
+                self.constrain_viewport(pipeline_id, constraints);
             }
 
             // When we are shutting_down, we need to avoid performing operations
@@ -399,7 +460,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         self.window.set_ready_state(self.get_earliest_pipeline_ready_state());
 
         // If we're painting in headless mode, schedule a recomposite.
-        if opts::get().output_file.is_some() {
+        if let CompositeTarget::PngFile = self.composite_target {
             self.composite_if_necessary(CompositingReason::Headless)
         }
     }
@@ -423,11 +484,22 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     /// recomposite if necessary.
     fn change_running_animations_state(&mut self,
                                        pipeline_id: PipelineId,
-                                       animations_running: bool) {
-        self.get_or_create_pipeline_details(pipeline_id).animations_running = animations_running;
-
-        if animations_running {
-            self.composite_if_necessary(CompositingReason::Animation);
+                                       animation_state: AnimationState) {
+        match animation_state {
+            AnimationState::AnimationsPresent => {
+                self.get_or_create_pipeline_details(pipeline_id).animations_running = true;
+                self.composite_if_necessary(CompositingReason::Animation);
+            }
+            AnimationState::AnimationCallbacksPresent => {
+                self.get_or_create_pipeline_details(pipeline_id).animation_callbacks_running = true;
+                self.composite_if_necessary(CompositingReason::Animation);
+            }
+            AnimationState::NoAnimationsPresent => {
+                self.get_or_create_pipeline_details(pipeline_id).animations_running = false;
+            }
+            AnimationState::NoAnimationCallbacksPresent => {
+                self.get_or_create_pipeline_details(pipeline_id).animation_callbacks_running = false;
+            }
         }
     }
 
@@ -545,7 +617,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         self.constellation_chan = new_constellation_chan;
         self.send_window_size();
 
-        self.got_set_frame_tree_message = true;
+        self.frame_tree_id.next();
         self.composite_if_necessary(CompositingReason::NewFrameTree);
     }
 
@@ -739,10 +811,18 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                               pipeline_id: PipelineId,
                               layer_id: LayerId,
                               new_layer_buffer_set: Box<LayerBufferSet>,
-                              epoch: Epoch) {
-        if let Some(layer) = self.find_layer_with_pipeline_and_layer_id(pipeline_id, layer_id) {
-            self.assign_painted_buffers_to_layer(layer, new_layer_buffer_set, epoch);
-            return
+                              epoch: Epoch,
+                              frame_tree_id: FrameTreeId) {
+        // If the frame tree id has changed since this paint request was sent,
+        // reject the buffers and send them back to the paint task. If this isn't handled
+        // correctly, the content_age in the tile grid can get out of sync when iframes are
+        // loaded and the frame tree changes. This can result in the compositor thinking it
+        // has already drawn the most recently painted buffer, and missing a frame.
+        if frame_tree_id == self.frame_tree_id {
+            if let Some(layer) = self.find_layer_with_pipeline_and_layer_id(pipeline_id, layer_id) {
+                self.assign_painted_buffers_to_layer(layer, new_layer_buffer_set, epoch);
+                return
+            }
         }
 
         let pipeline = self.get_pipeline(pipeline_id);
@@ -947,10 +1027,26 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     /// If there are any animations running, dispatches appropriate messages to the constellation.
     fn process_animations(&mut self) {
         for (pipeline_id, pipeline_details) in self.pipeline_details.iter() {
-            if !pipeline_details.animations_running {
-                continue
+            if pipeline_details.animations_running ||
+               pipeline_details.animation_callbacks_running {
+
+                self.constellation_chan.0.send(ConstellationMsg::TickAnimation(*pipeline_id)).unwrap();
             }
-            self.constellation_chan.0.send(ConstellationMsg::TickAnimation(*pipeline_id)).unwrap();
+        }
+    }
+
+    fn constrain_viewport(&mut self, pipeline_id: PipelineId, constraints: ViewportConstraints) {
+        let is_root = self.root_pipeline.as_ref().map_or(false, |root_pipeline| {
+            root_pipeline.id == pipeline_id
+        });
+
+        if is_root {
+            // TODO: actual viewport size
+
+            self.viewport_zoom = constraints.initial_zoom;
+            self.min_viewport_zoom = constraints.min_zoom;
+            self.max_viewport_zoom = constraints.max_zoom;
+            self.update_zoom_transform();
         }
     }
 
@@ -985,12 +1081,19 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
     // TODO(pcwalton): I think this should go through the same queuing as scroll events do.
     fn on_pinch_zoom_window_event(&mut self, magnification: f32) {
+        use num::Float;
+
         self.zoom_action = true;
         self.zoom_time = precise_time_s();
         let old_viewport_zoom = self.viewport_zoom;
 
-        self.viewport_zoom = ScaleFactor::new((self.viewport_zoom.get() * magnification).max(1.0));
-        let viewport_zoom = self.viewport_zoom;
+        let mut viewport_zoom = self.viewport_zoom.get() * magnification;
+        if let Some(min_zoom) = self.min_viewport_zoom.as_ref() {
+            viewport_zoom = min_zoom.get().max(viewport_zoom)
+        }
+        let viewport_zoom = self.max_viewport_zoom.as_ref().map_or(1., |z| z.get()).min(viewport_zoom);
+        let viewport_zoom = ScaleFactor::new(viewport_zoom);
+        self.viewport_zoom = viewport_zoom;
 
         self.update_zoom_transform();
 
@@ -1114,7 +1217,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         for (pipeline_id, requests) in pipeline_requests.into_iter() {
             num_paint_msgs_sent += 1;
             debug!("Sending paint request to {:?}", pipeline_id);
-            self.get_pipeline(pipeline_id).paint(requests)
+            self.get_pipeline(pipeline_id).paint(requests, self.frame_tree_id)
         }
 
         self.add_outstanding_paint_msg(num_paint_msgs_sent);
@@ -1138,7 +1241,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             return false;
         }
 
-        if !self.got_set_frame_tree_message {
+        if self.frame_tree_id == FrameTreeId(0) {
             return false;
         }
 
@@ -1146,35 +1249,31 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 
     fn composite(&mut self) {
+        let target = self.composite_target;
+        self.composite_specific_target(target);
+    }
+
+    fn composite_specific_target(&mut self, target: CompositeTarget) -> Option<png::Image> {
         if !self.window.prepare_for_composite() {
-            return
+            return None
         }
 
-        let output_image = opts::get().output_file.is_some() &&
-                            self.is_ready_to_paint_image_output();
+        match target {
+            CompositeTarget::WindowAndPng | CompositeTarget::PngFile => {
+                if !self.is_ready_to_paint_image_output() {
+                    return None
+                }
+            },
+            _ => {}
+        }
 
-        let mut framebuffer_ids = vec!();
-        let mut texture_ids = vec!();
         let (width, height) =
             (self.window_size.width.get() as usize, self.window_size.height.get() as usize);
 
-        if output_image {
-            framebuffer_ids = gl::gen_framebuffers(1);
-            gl::bind_framebuffer(gl::FRAMEBUFFER, framebuffer_ids[0]);
-
-            texture_ids = gl::gen_textures(1);
-            gl::bind_texture(gl::TEXTURE_2D, texture_ids[0]);
-
-            gl::tex_image_2d(gl::TEXTURE_2D, 0, gl::RGB as GLint, width as GLsizei,
-                             height as GLsizei, 0, gl::RGB, gl::UNSIGNED_BYTE, None);
-            gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
-            gl::tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
-
-            gl::framebuffer_texture_2d(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D,
-                                       texture_ids[0], 0);
-
-            gl::bind_texture(gl::TEXTURE_2D, 0);
-        }
+        let (framebuffer_ids, texture_ids) = match target {
+            CompositeTarget::Window => (vec!(), vec!()),
+            _ => initialize_png(width, height)
+        };
 
         profile(ProfilerCategory::Compositing, None, self.time_profiler_chan.clone(), || {
             // Adjust the layer dimensions as necessary to correspond to the size of the window.
@@ -1194,41 +1293,24 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             }
         });
 
-        if output_image {
-            let path = opts::get().output_file.as_ref().unwrap();
-            let mut pixels = gl::read_pixels(0, 0,
-                                             width as gl::GLsizei,
-                                             height as gl::GLsizei,
-                                             gl::RGB, gl::UNSIGNED_BYTE);
-
-            gl::bind_framebuffer(gl::FRAMEBUFFER, 0);
-
-            gl::delete_buffers(&texture_ids);
-            gl::delete_frame_buffers(&framebuffer_ids);
-
-            // flip image vertically (texture is upside down)
-            let orig_pixels = pixels.clone();
-            let stride = width * 3;
-            for y in 0..height {
-                let dst_start = y * stride;
-                let src_start = (height - y - 1) * stride;
-                let src_slice = &orig_pixels[src_start .. src_start + stride];
-                copy_memory(&mut pixels[dst_start .. dst_start + stride],
-                            &src_slice[..stride]);
+        let rv = match target {
+            CompositeTarget::Window => None,
+            CompositeTarget::WindowAndPng => {
+                Some(self.draw_png(framebuffer_ids, texture_ids, width, height))
             }
-            let mut img = png::Image {
-                width: width as u32,
-                height: height as u32,
-                pixels: png::PixelsByColorType::RGB8(pixels),
-            };
-            let res = png::store_png(&mut img, &path);
-            assert!(res.is_ok());
+            CompositeTarget::PngFile => {
+                let mut img = self.draw_png(framebuffer_ids, texture_ids, width, height);
+                let path = opts::get().output_file.as_ref().unwrap();
+                let res = png::store_png(&mut img, &path);
+                assert!(res.is_ok());
 
-            debug!("shutting down the constellation after generating an output file");
-            let ConstellationChan(ref chan) = self.constellation_chan;
-            chan.send(ConstellationMsg::Exit).unwrap();
-            self.shutdown_state = ShutdownState::ShuttingDown;
-        }
+                debug!("shutting down the constellation after generating an output file");
+                let ConstellationChan(ref chan) = self.constellation_chan;
+                chan.send(ConstellationMsg::Exit).unwrap();
+                self.shutdown_state = ShutdownState::ShuttingDown;
+                None
+            }
+        };
 
         // Perform the page flip. This will likely block for a while.
         self.window.present();
@@ -1238,6 +1320,35 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         self.composition_request = CompositionRequest::NoCompositingNecessary;
         self.process_pending_scroll_events();
         self.process_animations();
+        rv
+    }
+
+    fn draw_png(&self, framebuffer_ids: Vec<gl::GLuint>, texture_ids: Vec<gl::GLuint>, width: usize, height: usize) -> png::Image {
+        let mut pixels = gl::read_pixels(0, 0,
+                                         width as gl::GLsizei,
+                                         height as gl::GLsizei,
+                                         gl::RGB, gl::UNSIGNED_BYTE);
+
+        gl::bind_framebuffer(gl::FRAMEBUFFER, 0);
+
+        gl::delete_buffers(&texture_ids);
+        gl::delete_frame_buffers(&framebuffer_ids);
+
+        // flip image vertically (texture is upside down)
+        let orig_pixels = pixels.clone();
+        let stride = width * 3;
+        for y in 0..height {
+            let dst_start = y * stride;
+            let src_start = (height - y - 1) * stride;
+            let src_slice = &orig_pixels[src_start .. src_start + stride];
+            copy_memory(&src_slice[..stride],
+                        &mut pixels[dst_start .. dst_start + stride]);
+        }
+        png::Image {
+            width: width as u32,
+            height: height as u32,
+            pixels: png::PixelsByColorType::RGB8(pixels),
+        }
     }
 
     fn composite_if_necessary(&mut self, reason: CompositingReason) {

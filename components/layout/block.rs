@@ -29,10 +29,11 @@
 
 use context::LayoutContext;
 use css::node_style::StyledNode;
-use display_list_builder::{BlockFlowDisplayListBuilding, FragmentDisplayListBuilding};
+use display_list_builder::{BlockFlowDisplayListBuilding, BorderPaintingMode};
+use display_list_builder::{FragmentDisplayListBuilding};
 use floats::{ClearType, FloatKind, Floats, PlacementInfo};
 use flow::{self, AbsolutePositionInfo, BaseFlow, ForceNonfloatedFlag, FlowClass, Flow};
-use flow::{ImmutableFlowUtils, MutableFlowUtils, PreorderFlowTraversal};
+use flow::{ImmutableFlowUtils, PreorderFlowTraversal};
 use flow::{PostorderFlowTraversal, mut_base};
 use flow::{BLOCK_POSITION_IS_STATIC, HAS_LEFT_FLOATED_DESCENDANTS, HAS_RIGHT_FLOATED_DESCENDANTS};
 use flow::{IMPACTED_BY_LEFT_FLOATS, IMPACTED_BY_RIGHT_FLOATS, INLINE_POSITION_IS_STATIC};
@@ -44,7 +45,6 @@ use incremental::{REFLOW, REFLOW_OUT_OF_FLOW};
 use layout_debug;
 use model::{IntrinsicISizes, MarginCollapseInfo};
 use model::{MaybeAuto, CollapsibleMargins, specified, specified_or_none};
-use table;
 use wrapper::ThreadSafeLayoutNode;
 
 use geom::{Point2D, Rect, Size2D};
@@ -54,12 +54,13 @@ use rustc_serialize::{Encoder, Encodable};
 use std::cmp::{max, min};
 use std::fmt;
 use std::sync::Arc;
-use style::computed_values::{overflow_x, overflow_y, position, box_sizing, display, float};
+use style::computed_values::{border_collapse, box_sizing, display, float, overflow_x, overflow_y};
+use style::computed_values::{position, text_align};
 use style::properties::ComputedValues;
 use style::values::computed::{LengthOrPercentage, LengthOrPercentageOrAuto};
 use style::values::computed::{LengthOrPercentageOrNone};
 use util::geometry::{Au, MAX_AU};
-use util::logical_geometry::{LogicalPoint, LogicalRect, LogicalSize};
+use util::logical_geometry::{LogicalPoint, LogicalRect, LogicalSize, WritingMode};
 use util::opts;
 
 /// Information specific to floated blocks.
@@ -87,7 +88,7 @@ impl FloatedBlockInfo {
 }
 
 /// The solutions for the block-size-and-margins constraint equation.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 struct BSizeConstraintSolution {
     block_start: Au,
     block_size: Au,
@@ -561,33 +562,20 @@ impl Encodable for BlockFlowFlags {
 }
 
 impl BlockFlow {
-    pub fn from_node_and_fragment(node: &ThreadSafeLayoutNode, fragment: Fragment) -> BlockFlow {
+    pub fn from_node_and_fragment(node: &ThreadSafeLayoutNode,
+                                  fragment: Fragment,
+                                  float_kind: Option<FloatKind>)
+                                  -> BlockFlow {
         let writing_mode = node.style().writing_mode;
         BlockFlow {
-            base: BaseFlow::new(Some((*node).clone()),
-                                writing_mode,
-                                ForceNonfloatedFlag::ForceNonfloated),
+            base: BaseFlow::new(Some((*node).clone()), writing_mode, match float_kind {
+                Some(_) => ForceNonfloatedFlag::FloatIfNecessary,
+                None => ForceNonfloatedFlag::ForceNonfloated,
+            }),
             fragment: fragment,
             inline_size_of_preceding_left_floats: Au(0),
             inline_size_of_preceding_right_floats: Au(0),
-            float: None,
-            flags: BlockFlowFlags::empty(),
-        }
-    }
-
-    pub fn float_from_node_and_fragment(node: &ThreadSafeLayoutNode,
-                                        fragment: Fragment,
-                                        float_kind: FloatKind)
-                                        -> BlockFlow {
-        let writing_mode = node.style().writing_mode;
-        BlockFlow {
-            base: BaseFlow::new(Some((*node).clone()),
-                                writing_mode,
-                                ForceNonfloatedFlag::FloatIfNecessary),
-            fragment: fragment,
-            inline_size_of_preceding_left_floats: Au(0),
-            inline_size_of_preceding_right_floats: Au(0),
-            float: Some(box FloatedBlockInfo::new(float_kind)),
+            float: float_kind.map(|kind| box FloatedBlockInfo::new(kind)),
             flags: BlockFlowFlags::empty(),
         }
     }
@@ -945,7 +933,7 @@ impl BlockFlow {
             if is_root {
                 let screen_size = LogicalSize::from_physical(self.fragment.style.writing_mode,
                                                              layout_context.shared.screen_size);
-                block_size = Au::max(screen_size.block, block_size)
+                block_size = max(screen_size.block, block_size)
             }
 
             if is_root || self.formatting_context_type() != FormattingContextType::None ||
@@ -1193,46 +1181,40 @@ impl BlockFlow {
     /// Compute inline size based using the `block_container_inline_size` set by the parent flow.
     ///
     /// This is run in the `AssignISizes` traversal.
-    pub fn propagate_and_compute_used_inline_size(&mut self, layout_context: &LayoutContext) {
+    fn propagate_and_compute_used_inline_size(&mut self, layout_context: &LayoutContext) {
         let containing_block_inline_size = self.base.block_container_inline_size;
         self.compute_used_inline_size(layout_context, containing_block_inline_size);
         if self.base.flags.is_float() {
-            self.float.as_mut().unwrap().containing_inline_size = containing_block_inline_size;
+            self.float.as_mut().unwrap().containing_inline_size = containing_block_inline_size
         }
     }
 
     /// Assigns the computed inline-start content edge and inline-size to all the children of this
-    /// block flow. Also computes whether each child will be impacted by floats.
+    /// block flow. Also computes whether each child will be impacted by floats. The given
+    /// `callback`, if supplied, will be called once per child; it is currently used to push down
+    /// column sizes for tables.
     ///
     /// `#[inline(always)]` because this is called only from block or table inline-size assignment
     /// and the code for block layout is significantly simpler.
     #[inline(always)]
-    pub fn propagate_assigned_inline_size_to_children(
-            &mut self,
-            layout_context: &LayoutContext,
-            inline_start_content_edge: Au,
-            inline_end_content_edge: Au,
-            content_inline_size: Au,
-            table_info: Option<table::ChildInlineSizeInfo>) {
+    pub fn propagate_assigned_inline_size_to_children<F>(&mut self,
+                                                         layout_context: &LayoutContext,
+                                                         inline_start_content_edge: Au,
+                                                         inline_end_content_edge: Au,
+                                                         content_inline_size: Au,
+                                                         mut callback: F)
+                                                         where F: FnMut(&mut Flow,
+                                                                        usize,
+                                                                        Au,
+                                                                        WritingMode,
+                                                                        &mut Au,
+                                                                        &mut Au) {
         // Keep track of whether floats could impact each child.
         let mut inline_start_floats_impact_child =
             self.base.flags.contains(IMPACTED_BY_LEFT_FLOATS);
         let mut inline_end_floats_impact_child =
             self.base.flags.contains(IMPACTED_BY_RIGHT_FLOATS);
 
-        let absolute_static_i_offset = if self.is_positioned() {
-            // This flow is the containing block. The static inline offset will be the inline-start
-            // padding edge.
-            self.fragment.border_padding.inline_start
-                - self.fragment.style().logical_border_width().inline_start
-        } else {
-            // For kids, the inline-start margin edge will be at our inline-start content edge. The
-            // current static offset is at our inline-start margin edge. So move in to the
-            // inline-start content edge.
-            self.base.absolute_static_i_offset + inline_start_content_edge
-        };
-
-        let fixed_static_i_offset = self.base.fixed_static_i_offset + inline_start_content_edge;
         let flags = self.base.flags.clone();
 
         // Remember the inline-sizes of the last left and right floats, if there were any. These
@@ -1277,18 +1259,14 @@ impl BlockFlow {
         let containing_block_mode = self.base.writing_mode;
 
         // This value is used only for table cells.
-        let mut inline_start_margin_edge = if table_info.is_some() {
-            inline_start_content_edge
-        } else {
-            Au(0)
-        };
+        let mut inline_start_margin_edge = inline_start_content_edge;
+        let mut inline_end_margin_edge = inline_end_content_edge;
 
-        for (i, kid) in self.base.child_iter().enumerate() {
+        let mut iterator = self.base.child_iter().enumerate().peekable();
+        while let Some((i, kid)) = iterator.next() {
             {
                 let kid_base = flow::mut_base(kid);
                 kid_base.block_container_explicit_block_size = explicit_content_size;
-                kid_base.absolute_static_i_offset = absolute_static_i_offset;
-                kid_base.fixed_static_i_offset = fixed_static_i_offset;
             }
 
             // Determine float impaction, and update the inline size speculations if necessary.
@@ -1350,14 +1328,14 @@ impl BlockFlow {
                     inline_size_of_preceding_right_floats;
             }
 
-            // Handle tables.
-            if let Some(ref table_info) = table_info {
-                table_info.propagate_to_child(kid,
-                                              i,
-                                              content_inline_size,
-                                              containing_block_mode,
-                                              &mut inline_start_margin_edge);
-            }
+            // Call the callback to propagate extra inline size information down to the child. This
+            // is currently used for tables.
+            callback(kid,
+                     i,
+                     content_inline_size,
+                     containing_block_mode,
+                     &mut inline_start_margin_edge,
+                     &mut inline_end_margin_edge);
 
             // Per CSS 2.1 § 16.3.1, text alignment propagates to all children in flow.
             //
@@ -1391,7 +1369,8 @@ impl BlockFlow {
                 FormattingContextType::Other
             }
             _ if style.get_box().overflow_x != overflow_x::T::visible ||
-                    style.get_box().overflow_y != overflow_y::T(overflow_x::T::visible) => {
+                    style.get_box().overflow_y != overflow_y::T(overflow_x::T::visible) ||
+                    style.is_multicol() => {
                 FormattingContextType::Block
             }
             _ => FormattingContextType::None,
@@ -1419,9 +1398,7 @@ impl BlockFlow {
         }
 
         let info = PlacementInfo {
-            size: LogicalSize::new(self.fragment.style.writing_mode,
-                                   self.base.position.size.inline,
-                                   self.fragment.border_box.size.block),
+            size: self.fragment.border_box.size,
             ceiling: self.base.position.start.b,
             max_inline_size: MAX_AU,
             kind: FloatKind::Left,
@@ -1491,8 +1468,8 @@ impl Flow for BlockFlow {
 
         // Find the maximum inline-size from children.
         let mut computation = self.fragment.compute_intrinsic_inline_sizes();
-        let mut left_float_width = Au(0);
-        let mut right_float_width = Au(0);
+        let (mut left_float_width, mut right_float_width) = (Au(0), Au(0));
+        let (mut left_float_width_accumulator, mut right_float_width_accumulator) = (Au(0), Au(0));
         for kid in self.base.child_iter() {
             let is_absolutely_positioned =
                 flow::base(kid).flags.contains(IS_ABSOLUTELY_POSITIONED);
@@ -1503,6 +1480,15 @@ impl Flow for BlockFlow {
                     max(computation.content_intrinsic_sizes.minimum_inline_size,
                         child_base.intrinsic_inline_sizes.minimum_inline_size);
 
+                if child_base.flags.contains(CLEARS_LEFT) {
+                    left_float_width = max(left_float_width, left_float_width_accumulator);
+                    left_float_width_accumulator = Au(0)
+                }
+                if child_base.flags.contains(CLEARS_RIGHT) {
+                    right_float_width = max(right_float_width, right_float_width_accumulator);
+                    right_float_width_accumulator = Au(0)
+                }
+
                 match float_kind {
                     float::T::none => {
                         computation.content_intrinsic_sizes.preferred_inline_size =
@@ -1510,11 +1496,11 @@ impl Flow for BlockFlow {
                                 child_base.intrinsic_inline_sizes.preferred_inline_size);
                     }
                     float::T::left => {
-                        left_float_width = left_float_width +
+                        left_float_width_accumulator = left_float_width_accumulator +
                             child_base.intrinsic_inline_sizes.preferred_inline_size;
                     }
                     float::T::right => {
-                        right_float_width = right_float_width +
+                        right_float_width_accumulator = right_float_width_accumulator +
                             child_base.intrinsic_inline_sizes.preferred_inline_size;
                     }
                 }
@@ -1526,6 +1512,8 @@ impl Flow for BlockFlow {
         // FIXME(pcwalton): This should consider all float descendants, not just children.
         // FIXME(pcwalton): This is not well-spec'd; INTRINSIC specifies to do this, but CSS-SIZING
         // says not to. In practice, Gecko and WebKit both do this.
+        left_float_width = max(left_float_width, left_float_width_accumulator);
+        right_float_width = max(right_float_width, right_float_width_accumulator);
         computation.content_intrinsic_sizes.preferred_inline_size =
             max(computation.content_intrinsic_sizes.preferred_inline_size,
                 left_float_width + right_float_width);
@@ -1617,7 +1605,7 @@ impl Flow for BlockFlow {
                                                         inline_start_content_edge,
                                                         inline_end_content_edge,
                                                         content_inline_size,
-                                                        None);
+                                                        |_, _, _, _, _, _| {});
     }
 
     fn place_float_if_applicable<'a>(&mut self, _: &'a LayoutContext<'a>) {
@@ -1643,6 +1631,7 @@ impl Flow for BlockFlow {
             self.base.thread_id = parent_thread_id;
             if self.base.restyle_damage.intersects(REFLOW_OUT_OF_FLOW | REFLOW) {
                 self.assign_block_size(layout_context);
+                self.store_overflow(layout_context);
                 // Don't remove the restyle damage; `assign_block_size` decides whether that is
                 // appropriate (which in the case of e.g. absolutely-positioned flows, it is not).
             }
@@ -1906,7 +1895,9 @@ impl Flow for BlockFlow {
     }
 
     fn build_display_list(&mut self, layout_context: &LayoutContext) {
-        self.build_display_list_for_block(box DisplayList::new(), layout_context);
+        self.build_display_list_for_block(box DisplayList::new(),
+                                          layout_context,
+                                          BorderPaintingMode::Separate);
         if opts::get().validate_display_list_geometry {
             self.base.validate_display_list_geometry();
         }
@@ -1936,7 +1927,7 @@ impl Flow for BlockFlow {
                                                             self.base
                                                                 .absolute_position_info
                                                                 .relative_containing_block_mode,
-                                                            CoordinateSystem::Parent)
+                                                            CoordinateSystem::Own)
                               .translate(stacking_context_position));
     }
 
@@ -1957,13 +1948,14 @@ impl fmt::Debug for BlockFlow {
 }
 
 /// The inputs for the inline-sizes-and-margins constraint equation.
-#[derive(Debug, Copy)]
+#[derive(Debug, Copy, Clone)]
 pub struct ISizeConstraintInput {
     pub computed_inline_size: MaybeAuto,
     pub inline_start_margin: MaybeAuto,
     pub inline_end_margin: MaybeAuto,
     pub inline_start: MaybeAuto,
     pub inline_end: MaybeAuto,
+    pub text_align: text_align::T,
     pub available_inline_size: Au,
 }
 
@@ -1973,6 +1965,7 @@ impl ISizeConstraintInput {
                inline_end_margin: MaybeAuto,
                inline_start: MaybeAuto,
                inline_end: MaybeAuto,
+               text_align: text_align::T,
                available_inline_size: Au)
            -> ISizeConstraintInput {
         ISizeConstraintInput {
@@ -1981,13 +1974,14 @@ impl ISizeConstraintInput {
             inline_end_margin: inline_end_margin,
             inline_start: inline_start,
             inline_end: inline_end,
+            text_align: text_align,
             available_inline_size: available_inline_size,
         }
     }
 }
 
 /// The solutions for the inline-size-and-margins constraint equation.
-#[derive(Copy, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct ISizeConstraintSolution {
     pub inline_start: Au,
     pub inline_size: Au,
@@ -2024,6 +2018,12 @@ impl ISizeConstraintSolution {
 //
 // CSS Section 10.3
 pub trait ISizeAndMarginsComputer {
+    /// Instructs the fragment to compute its border and padding.
+    fn compute_border_and_padding(&self, block: &mut BlockFlow, containing_block_inline_size: Au) {
+        block.fragment.compute_border_and_padding(containing_block_inline_size,
+                                                  border_collapse::T::separate);
+    }
+
     /// Compute the inputs for the ISize constraint equation.
     ///
     /// This is called only once to compute the initial inputs. For calculations involving
@@ -2038,12 +2038,11 @@ pub trait ISizeAndMarginsComputer {
 
         block.fragment.compute_block_direction_margins(containing_block_inline_size);
         block.fragment.compute_inline_direction_margins(containing_block_inline_size);
-        block.fragment.compute_border_and_padding(containing_block_inline_size);
+        self.compute_border_and_padding(block, containing_block_inline_size);
 
         let mut computed_inline_size = self.initial_computed_inline_size(block,
                                                                          parent_flow_inline_size,
                                                                          layout_context);
-
         let style = block.fragment.style();
         match (computed_inline_size, style.get_box().box_sizing) {
             (MaybeAuto::Specified(size), box_sizing::T::border_box) => {
@@ -2071,6 +2070,7 @@ pub trait ISizeAndMarginsComputer {
                                                         containing_block_inline_size),
                                   MaybeAuto::from_style(position.inline_end,
                                                         containing_block_inline_size),
+                                  style.get_inheritedtext().text_align,
                                   available_inline_size)
     }
 
@@ -2143,12 +2143,12 @@ pub trait ISizeAndMarginsComputer {
     fn initial_computed_inline_size(&self,
                                     block: &mut BlockFlow,
                                     parent_flow_inline_size: Au,
-                                    ctx: &LayoutContext)
+                                    layout_context: &LayoutContext)
                                     -> MaybeAuto {
         MaybeAuto::from_style(block.fragment().style().content_inline_size(),
                               self.containing_block_inline_size(block,
                                                                 parent_flow_inline_size,
-                                                                ctx))
+                                                                layout_context))
     }
 
     fn containing_block_inline_size(&self,
@@ -2246,34 +2246,61 @@ pub trait ISizeAndMarginsComputer {
         // available_inline-size
         let (inline_start_margin, mut inline_size, inline_end_margin) =
             match (inline_start_margin, computed_inline_size, inline_end_margin) {
-                // If all have a computed value other than 'auto', the system is
-                // over-constrained so we discard the end margin.
-                (MaybeAuto::Specified(margin_start), MaybeAuto::Specified(inline_size), MaybeAuto::Specified(margin_end)) => {
-                    if parent_has_same_direction {
-                        (margin_start, inline_size, available_inline_size -
-                         (margin_start + inline_size))
-                    } else {
-                        (available_inline_size - (margin_end + inline_size), inline_size, margin_end)
+                // If all have a computed value other than 'auto', the system is over-constrained.
+                (MaybeAuto::Specified(margin_start),
+                 MaybeAuto::Specified(inline_size),
+                 MaybeAuto::Specified(margin_end)) => {
+                    match (input.text_align, parent_has_same_direction) {
+                        (text_align::T::servo_center, _) => {
+                            // This is used for `<center>` and friends per HTML5 § 14.3.3. Make the
+                            // inline-start and inline-end margins equal per HTML5 § 14.2.
+                            let margin = (available_inline_size - inline_size).scale_by(0.5);
+                            (margin, inline_size, margin)
+                        }
+                        (_, true) => {
+                            // Ignore the end margin.
+                            (margin_start, inline_size, available_inline_size -
+                             (margin_start + inline_size))
+                        }
+                        (_, false) => {
+                            // Ignore the start margin.
+                            (available_inline_size - (margin_end + inline_size),
+                             inline_size,
+                             margin_end)
+                        }
                     }
                 }
                 // If exactly one value is 'auto', solve for it
-                (MaybeAuto::Auto, MaybeAuto::Specified(inline_size), MaybeAuto::Specified(margin_end)) =>
+                (MaybeAuto::Auto,
+                 MaybeAuto::Specified(inline_size),
+                 MaybeAuto::Specified(margin_end)) =>
                     (available_inline_size - (inline_size + margin_end), inline_size, margin_end),
-                (MaybeAuto::Specified(margin_start), MaybeAuto::Auto, MaybeAuto::Specified(margin_end)) =>
-                    (margin_start, available_inline_size - (margin_start + margin_end),
-                     margin_end),
-                (MaybeAuto::Specified(margin_start), MaybeAuto::Specified(inline_size), MaybeAuto::Auto) =>
-                    (margin_start, inline_size, available_inline_size -
-                     (margin_start + inline_size)),
+                (MaybeAuto::Specified(margin_start),
+                 MaybeAuto::Auto,
+                 MaybeAuto::Specified(margin_end)) => {
+                    (margin_start,
+                     available_inline_size - (margin_start + margin_end),
+                     margin_end)
+                }
+                (MaybeAuto::Specified(margin_start),
+                 MaybeAuto::Specified(inline_size),
+                 MaybeAuto::Auto) => {
+                    (margin_start,
+                     inline_size,
+                     available_inline_size - (margin_start + inline_size))
+                }
 
                 // If inline-size is set to 'auto', any other 'auto' value becomes '0',
                 // and inline-size is solved for
-                (MaybeAuto::Auto, MaybeAuto::Auto, MaybeAuto::Specified(margin_end)) =>
-                    (Au::new(0), available_inline_size - margin_end, margin_end),
-                (MaybeAuto::Specified(margin_start), MaybeAuto::Auto, MaybeAuto::Auto) =>
-                    (margin_start, available_inline_size - margin_start, Au::new(0)),
-                (MaybeAuto::Auto, MaybeAuto::Auto, MaybeAuto::Auto) =>
-                    (Au::new(0), available_inline_size, Au::new(0)),
+                (MaybeAuto::Auto, MaybeAuto::Auto, MaybeAuto::Specified(margin_end)) => {
+                    (Au(0), available_inline_size - margin_end, margin_end)
+                }
+                (MaybeAuto::Specified(margin_start), MaybeAuto::Auto, MaybeAuto::Auto) => {
+                    (margin_start, available_inline_size - margin_start, Au(0))
+                }
+                (MaybeAuto::Auto, MaybeAuto::Auto, MaybeAuto::Auto) => {
+                    (Au(0), available_inline_size, Au(0))
+                }
 
                 // If inline-start and inline-end margins are auto, they become equal
                 (MaybeAuto::Auto, MaybeAuto::Specified(inline_size), MaybeAuto::Auto) => {
@@ -2617,7 +2644,9 @@ impl ISizeAndMarginsComputer for BlockReplaced {
                                      -> ISizeConstraintSolution {
         match input.computed_inline_size {
             MaybeAuto::Specified(_) => {},
-            MaybeAuto::Auto => panic!("BlockReplaced: inline_size should have been computed by now")
+            MaybeAuto::Auto => {
+                panic!("BlockReplaced: inline_size should have been computed by now")
+            }
         };
         self.solve_block_inline_size_constraints(block, input)
     }

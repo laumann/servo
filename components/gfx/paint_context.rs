@@ -34,7 +34,6 @@ use png::PixelsByColorType;
 use std::default::Default;
 use std::f32;
 use std::mem;
-use std::num::Float;
 use std::ptr;
 use std::sync::Arc;
 use style::computed_values::{border_style, filter, image_rendering, mix_blend_mode};
@@ -57,7 +56,7 @@ pub struct PaintContext<'a> {
     pub transient_clip: Option<ClippingRegion>,
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 enum Direction {
     Top,
     Left,
@@ -65,7 +64,7 @@ enum Direction {
     Bottom
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 enum DashSize {
     DottedBorder = 1,
     DashedBorder = 3
@@ -78,7 +77,7 @@ impl<'a> PaintContext<'a> {
 
     pub fn draw_solid_color(&self, bounds: &Rect<Au>, color: Color) {
         self.draw_target.make_current();
-        self.draw_target.fill_rect(&bounds.to_azure_rect(),
+        self.draw_target.fill_rect(&bounds.to_nearest_azure_rect(),
                                    PatternRef::Color(&ColorPattern::new(color)),
                                    None);
     }
@@ -105,7 +104,7 @@ impl<'a> PaintContext<'a> {
     }
 
     pub fn draw_push_clip(&self, bounds: &Rect<Au>) {
-        let rect = bounds.to_azure_rect();
+        let rect = bounds.to_nearest_azure_rect();
         let path_builder = self.draw_target.create_path_builder();
 
         let left_top = Point2D(rect.origin.x, rect.origin.y);
@@ -133,8 +132,8 @@ impl<'a> PaintContext<'a> {
                       image_rendering: image_rendering::T) {
         let size = Size2D(image.width as i32, image.height as i32);
         let (pixel_width, pixels, source_format) = match image.pixels {
-            PixelsByColorType::RGBA8(ref pixels) => (4, pixels.as_slice(), SurfaceFormat::B8G8R8A8),
-            PixelsByColorType::K8(ref pixels) => (1, pixels.as_slice(), SurfaceFormat::A8),
+            PixelsByColorType::RGBA8(ref pixels) => (4, pixels, SurfaceFormat::B8G8R8A8),
+            PixelsByColorType::K8(ref pixels) => (1, pixels, SurfaceFormat::A8),
             PixelsByColorType::RGB8(_) => panic!("RGB8 color type not supported"),
             PixelsByColorType::KA8(_) => panic!("KA8 color type not supported"),
         };
@@ -148,7 +147,7 @@ impl<'a> PaintContext<'a> {
                                                                             source_format);
         let source_rect = Rect(Point2D(0.0, 0.0),
                                Size2D(image.width as AzFloat, image.height as AzFloat));
-        let dest_rect = bounds.to_azure_rect();
+        let dest_rect = bounds.to_nearest_azure_rect();
 
         // TODO(pcwalton): According to CSS-IMAGES-3 § 5.3, nearest-neighbor interpolation is a
         // conforming implementation of `crisp-edges`, but it is not the best we could do.
@@ -290,11 +289,7 @@ impl<'a> PaintContext<'a> {
                         radii: &BorderRadii<AzFloat>,
                         color: Color) {
         let mut path_builder = self.draw_target.create_path_builder();
-        self.create_border_path_segment(&mut path_builder,
-                                        bounds,
-                                        direction,
-                                        border,
-                                        radii);
+        self.create_border_path_segment(&mut path_builder, bounds, direction, border, radii);
         let draw_options = DrawOptions::new(1.0, 0);
         self.draw_target.fill(&path_builder.finish(), &ColorPattern::new(color), &draw_options);
     }
@@ -621,7 +616,7 @@ impl<'a> PaintContext<'a> {
                                   border: &SideOffsets2D<f32>,
                                   color: Color,
                                   dash_size: DashSize) {
-        let rect = bounds.to_azure_rect();
+        let rect = bounds.to_nearest_azure_rect();
         let draw_opts = DrawOptions::new(1 as AzFloat, 0 as uint16_t);
         let border_width = match direction {
             Direction::Top => border.top,
@@ -676,7 +671,7 @@ impl<'a> PaintContext<'a> {
                                  border: &SideOffsets2D<f32>,
                                  radius: &BorderRadii<AzFloat>,
                                  color: Color) {
-        let rect = bounds.to_azure_rect();
+        let rect = bounds.to_nearest_azure_rect();
         self.draw_border_path(&rect, direction, border, radius, color);
     }
 
@@ -684,7 +679,7 @@ impl<'a> PaintContext<'a> {
                          bounds: &Rect<Au>,
                          border: &SideOffsets2D<f32>,
                          shrink_factor: f32) -> Rect<f32> {
-        let rect            = bounds.to_azure_rect();
+        let rect            = bounds.to_nearest_azure_rect();
         let scaled_border   = SideOffsets2D::new(shrink_factor * border.top,
                                                  shrink_factor * border.right,
                                                  shrink_factor * border.bottom,
@@ -693,7 +688,8 @@ impl<'a> PaintContext<'a> {
         let scaled_left_top = left_top + Point2D(scaled_border.left,
                                                  scaled_border.top);
         return Rect(scaled_left_top,
-                    Size2D(rect.size.width - 2.0 * scaled_border.right, rect.size.height - 2.0 * scaled_border.bottom));
+                    Size2D(rect.size.width - 2.0 * scaled_border.right,
+                           rect.size.height - 2.0 * scaled_border.bottom));
     }
 
     fn scale_color(&self, color: Color, scale_factor: f32) -> Color {
@@ -830,16 +826,16 @@ impl<'a> PaintContext<'a> {
         let baseline_origin = match text.orientation {
             Upright => text.baseline_origin,
             SidewaysLeft => {
-                let x = text.baseline_origin.x.to_subpx() as AzFloat;
-                let y = text.baseline_origin.y.to_subpx() as AzFloat;
+                let x = text.baseline_origin.x.to_f32_px();
+                let y = text.baseline_origin.y.to_f32_px();
                 self.draw_target.set_transform(&draw_target_transform.mul(&Matrix2D::new(0., -1.,
                                                                                          1., 0.,
                                                                                          x, y)));
                 Point2D::zero()
             }
             SidewaysRight => {
-                let x = text.baseline_origin.x.to_subpx() as AzFloat;
-                let y = text.baseline_origin.y.to_subpx() as AzFloat;
+                let x = text.baseline_origin.x.to_f32_px();
+                let y = text.baseline_origin.y.to_f32_px();
                 self.draw_target.set_transform(&draw_target_transform.mul(&Matrix2D::new(0., 1.,
                                                                                          -1., 0.,
                                                                                          x, y)));
@@ -883,11 +879,11 @@ impl<'a> PaintContext<'a> {
         self.draw_target.make_current();
 
         let stops = self.draw_target.create_gradient_stops(stops, ExtendMode::Clamp);
-        let pattern = LinearGradientPattern::new(&start_point.to_azure_point(),
-                                                 &end_point.to_azure_point(),
+        let pattern = LinearGradientPattern::new(&start_point.to_nearest_azure_point(),
+                                                 &end_point.to_nearest_azure_point(),
                                                  stops,
                                                  &Matrix2D::identity());
-        self.draw_target.fill_rect(&bounds.to_azure_rect(),
+        self.draw_target.fill_rect(&bounds.to_nearest_azure_rect(),
                                    PatternRef::LinearGradient(&pattern),
                                    None);
     }
@@ -1064,7 +1060,7 @@ impl<'a> PaintContext<'a> {
         }
 
         let blur_filter = self.draw_target.create_filter(FilterType::GaussianBlur);
-        blur_filter.set_attribute(GaussianBlurAttribute::StdDeviation(blur_radius.to_subpx() as
+        blur_filter.set_attribute(GaussianBlurAttribute::StdDeviation(blur_radius.to_f64_px() as
                                                                       AzFloat));
         blur_filter.set_input(GaussianBlurInput, &temporary_draw_target.draw_target.snapshot());
         temporary_draw_target.draw_filter(&self.draw_target, blur_filter);
@@ -1099,7 +1095,7 @@ impl<'a> PaintContext<'a> {
         self.draw_push_clip(&clip_region.main);
         for complex_region in clip_region.complex.iter() {
             // FIXME(pcwalton): Actually draw a rounded rect.
-            self.push_rounded_rect_clip(&complex_region.rect.to_azure_rect(),
+            self.push_rounded_rect_clip(&complex_region.rect.to_nearest_azure_rect(),
                                         &complex_region.radii.to_radii_px())
         }
         self.transient_clip = Some(clip_region)
@@ -1107,32 +1103,33 @@ impl<'a> PaintContext<'a> {
 }
 
 pub trait ToAzurePoint {
+    fn to_nearest_azure_point(&self) -> Point2D<AzFloat>;
     fn to_azure_point(&self) -> Point2D<AzFloat>;
-    fn to_subpx_azure_point(&self) -> Point2D<AzFloat>;
 }
 
 impl ToAzurePoint for Point2D<Au> {
-    fn to_azure_point(&self) -> Point2D<AzFloat> {
+    fn to_nearest_azure_point(&self) -> Point2D<AzFloat> {
         Point2D(self.x.to_nearest_px() as AzFloat, self.y.to_nearest_px() as AzFloat)
     }
-    fn to_subpx_azure_point(&self) -> Point2D<AzFloat> {
-        Point2D(self.x.to_subpx() as AzFloat, self.y.to_subpx() as AzFloat)
+    fn to_azure_point(&self) -> Point2D<AzFloat> {
+        Point2D(self.x.to_f32_px(), self.y.to_f32_px())
     }
 }
 
 pub trait ToAzureRect {
+    fn to_nearest_azure_rect(&self) -> Rect<AzFloat>;
     fn to_azure_rect(&self) -> Rect<AzFloat>;
-    fn to_subpx_azure_rect(&self) -> Rect<AzFloat>;
 }
 
 impl ToAzureRect for Rect<Au> {
-    fn to_azure_rect(&self) -> Rect<AzFloat> {
-        Rect(self.origin.to_azure_point(), Size2D(self.size.width.to_nearest_px() as AzFloat,
+    fn to_nearest_azure_rect(&self) -> Rect<AzFloat> {
+        Rect(self.origin.to_nearest_azure_point(), Size2D(self.size.width.to_nearest_px() as AzFloat,
                                                   self.size.height.to_nearest_px() as AzFloat))
+
     }
-    fn to_subpx_azure_rect(&self) -> Rect<AzFloat> {
-        Rect(self.origin.to_subpx_azure_point(), Size2D(self.size.width.to_subpx() as AzFloat,
-                                                        self.size.height.to_subpx() as AzFloat))
+    fn to_azure_rect(&self) -> Rect<AzFloat> {
+        Rect(self.origin.to_azure_point(), Size2D(self.size.width.to_f32_px(),
+                                                        self.size.height.to_f32_px()))
     }
 }
 
@@ -1244,8 +1241,8 @@ impl ScaledFontExtensionMethods for ScaledFont {
                 let azglyph = struct__AzGlyph {
                     mIndex: glyph.id() as uint32_t,
                     mPosition: struct__AzPoint {
-                        x: (origin.x + glyph_offset.x).to_subpx() as AzFloat,
-                        y: (origin.y + glyph_offset.y).to_subpx() as AzFloat
+                        x: (origin.x + glyph_offset.x).to_f32_px(),
+                        y: (origin.y + glyph_offset.y).to_f32_px(),
                     }
                 };
                 origin = Point2D(origin.x + glyph_advance, origin.y);
@@ -1309,7 +1306,7 @@ impl DrawTargetExtensions for DrawTarget {
         // +-----------+
         //  3           4
 
-        let (outer_rect, inner_rect) = (outer_rect.to_azure_rect(), inner_rect.to_azure_rect());
+        let (outer_rect, inner_rect) = (outer_rect.to_nearest_azure_rect(), inner_rect.to_nearest_azure_rect());
         let path_builder = self.create_path_builder();
         path_builder.move_to(Point2D(outer_rect.max_x(), outer_rect.origin.y));     // 1
         path_builder.line_to(Point2D(outer_rect.origin.x, outer_rect.origin.y));    // 2
@@ -1326,10 +1323,10 @@ impl DrawTargetExtensions for DrawTarget {
 
     fn create_rectangular_path(&self, rect: &Rect<Au>) -> Path {
         let path_builder = self.create_path_builder();
-        path_builder.move_to(rect.origin.to_azure_point());
-        path_builder.line_to(Point2D(rect.max_x(), rect.origin.y).to_azure_point());
-        path_builder.line_to(Point2D(rect.max_x(), rect.max_y()).to_azure_point());
-        path_builder.line_to(Point2D(rect.origin.x, rect.max_y()).to_azure_point());
+        path_builder.move_to(rect.origin.to_nearest_azure_point());
+        path_builder.line_to(Point2D(rect.max_x(), rect.origin.y).to_nearest_azure_point());
+        path_builder.line_to(Point2D(rect.max_x(), rect.max_y()).to_nearest_azure_point());
+        path_builder.line_to(Point2D(rect.origin.x, rect.max_y()).to_nearest_azure_point());
         path_builder.finish()
     }
 }
@@ -1388,7 +1385,7 @@ impl TemporaryDrawTarget {
     fn from_bounds(main_draw_target: &DrawTarget, bounds: &Rect<Au>) -> TemporaryDrawTarget {
         let draw_target_transform = main_draw_target.get_transform();
         let temporary_draw_target_bounds =
-            draw_target_transform.transform_rect(&bounds.to_subpx_azure_rect());
+            draw_target_transform.transform_rect(&bounds.to_azure_rect());
         let temporary_draw_target_size =
             Size2D(temporary_draw_target_bounds.size.width.ceil() as i32,
                    temporary_draw_target_bounds.size.height.ceil() as i32);

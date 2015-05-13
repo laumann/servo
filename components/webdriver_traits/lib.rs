@@ -5,13 +5,19 @@
 #![crate_name = "webdriver_traits"]
 #![crate_type = "rlib"]
 
-extern crate "rustc-serialize" as rustc_serialize;
+extern crate rustc_serialize;
 use rustc_serialize::json::{Json, ToJson};
 
 use std::sync::mpsc::Sender;
 
 pub enum WebDriverScriptCommand {
-    EvaluateJS(String, Sender<Result<EvaluateJSReply, ()>>)
+    EvaluateJS(String, Sender<Result<EvaluateJSReply, ()>>),
+    FindElementCSS(String, Sender<Result<Option<String>, ()>>),
+    FindElementsCSS(String, Sender<Result<Vec<String>, ()>>),
+    GetActiveElement(Sender<Option<String>>),
+    GetElementTagName(String, Sender<Result<String, ()>>),
+    GetElementText(String, Sender<Result<String, ()>>),
+    GetTitle(Sender<String>)
 }
 
 pub enum EvaluateJSReply {

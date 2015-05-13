@@ -19,17 +19,17 @@ pub enum FloatKind {
 }
 
 impl FloatKind {
-    pub fn from_property(property: float::T) -> FloatKind {
+    pub fn from_property(property: float::T) -> Option<FloatKind> {
         match property {
-            float::T::none => panic!("can't create a float type from an unfloated property"),
-            float::T::left => FloatKind::Left,
-            float::T::right => FloatKind::Right,
+            float::T::none => None,
+            float::T::left => Some(FloatKind::Left),
+            float::T::right => Some(FloatKind::Right),
         }
     }
 }
 
 /// The kind of clearance: left, right, or both.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub enum ClearType {
     Left,
     Right,

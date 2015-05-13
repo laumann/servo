@@ -30,6 +30,7 @@ use hyper::header::{ContentType, Host};
 use hyper::method::Method;
 use hyper::status::StatusClass::Success;
 
+use unicase::UniCase;
 use url::{SchemeData, Url};
 use util::task::spawn_named;
 
@@ -69,7 +70,7 @@ impl CORSRequest {
            referer.port() == destination.port() {
             return Ok(None); // Not cross-origin, proceed with a normal fetch
         }
-        match destination.scheme.as_slice() {
+        match &*destination.scheme {
             // TODO: If the request's same origin data url flag is set (which isn't the case for XHR)
             // we can fetch a data URL normally. about:blank can also be fetched by XHR
             "http" | "https" => {
@@ -185,10 +186,10 @@ impl CORSRequest {
         // Step 5 - 7
         let mut header_names = vec!();
         for header in self.headers.iter() {
-            header_names.push(header.name().to_ascii_lowercase());
+            header_names.push(header.name().to_owned());
         }
         header_names.sort();
-        preflight.headers.set(AccessControlRequestHeaders(header_names));
+        preflight.headers.set(AccessControlRequestHeaders(header_names.into_iter().map(UniCase).collect()));
 
         // Step 8 unnecessary, we don't use the request body
         // Step 9, 10 unnecessary, we're writing our own fetch code
@@ -221,7 +222,7 @@ impl CORSRequest {
         // Substeps 1-3 (parsing rules: https://fetch.spec.whatwg.org/#http-new-header-syntax)
         let methods_substep4 = [self.method.clone()];
         let mut methods = match response.headers.get() {
-            Some(&AccessControlAllowMethods(ref v)) => v.as_slice(),
+            Some(&AccessControlAllowMethods(ref v)) => &**v,
             _ => return error
         };
         let headers = match response.headers.get() {
@@ -420,7 +421,7 @@ impl CORSCache {
 fn is_simple_header(h: &HeaderView) -> bool {
     //FIXME: use h.is::<HeaderType>() when AcceptLanguage and
     //ContentLanguage headers exist
-    match h.name().to_ascii_lowercase().as_slice() {
+    match &*h.name().to_ascii_lowercase() {
         "accept" | "accept-language" | "content-language" => true,
         "content-type" => match h.value() {
             Some(&ContentType(Mime(TopLevel::Text, SubLevel::Plain, _))) |
@@ -444,13 +445,14 @@ fn is_simple_method(m: &Method) -> bool {
 /// Perform a CORS check on a header list and CORS request
 /// https://fetch.spec.whatwg.org/#cors-check
 pub fn allow_cross_origin_request(req: &CORSRequest, headers: &Headers) -> bool {
-    //FIXME(seanmonstar): use req.headers.get::<AccessControlAllowOrigin>()
-    match headers.get() {
-        Some(&AccessControlAllowOrigin::AllowStar) => true, // Not always true, depends on credentials mode
-        Some(&AccessControlAllowOrigin::AllowOrigin(ref url)) =>
+    match headers.get::<AccessControlAllowOrigin>() {
+        Some(&AccessControlAllowOrigin::Any) => true, // Not always true, depends on credentials mode
+        // FIXME: https://github.com/servo/servo/issues/6020
+        Some(&AccessControlAllowOrigin::Value(ref url)) =>
             url.scheme == req.origin.scheme &&
             url.host() == req.origin.host() &&
             url.port() == req.origin.port(),
+        Some(&AccessControlAllowOrigin::Null) |
         None => false
     }
 }

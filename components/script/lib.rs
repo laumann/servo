@@ -7,13 +7,9 @@
 #![feature(collections)]
 #![feature(core)]
 #![feature(custom_attribute)]
-#![feature(old_io)]
-#![feature(path)]
 #![feature(plugin)]
 #![feature(rustc_private)]
 #![feature(std_misc)]
-#![feature(unicode)]
-#![feature(unsafe_destructor)]
 
 #![deny(unsafe_code)]
 #![allow(non_snake_case)]
@@ -39,22 +35,26 @@ extern crate js;
 extern crate libc;
 extern crate msg;
 extern crate net_traits;
+extern crate num;
 extern crate png;
-extern crate "rustc-serialize" as rustc_serialize;
+extern crate rustc_serialize;
 extern crate time;
 extern crate canvas;
-extern crate profile;
+extern crate profile_traits;
 extern crate script_traits;
 extern crate selectors;
 extern crate util;
+extern crate websocket;
 #[macro_use]
 extern crate style;
+extern crate unicase;
 extern crate url;
 extern crate uuid;
 extern crate string_cache;
 extern crate webdriver_traits;
 
 pub mod cors;
+pub mod document_loader;
 
 #[macro_use]
 pub mod dom;
@@ -67,5 +67,7 @@ pub mod page;
 pub mod script_task;
 mod timers;
 pub mod textinput;
+pub mod clipboard_provider;
 mod devtools;
+mod horribly_inefficient_timers;
 mod webdriver_handlers;

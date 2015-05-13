@@ -2,16 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use document_loader::LoadType;
 use dom::attr::{Attr, AttrValue};
 use dom::attr::AttrHelpers;
 use dom::bindings::codegen::Bindings::HTMLLinkElementBinding;
 use dom::bindings::codegen::Bindings::HTMLLinkElementBinding::HTMLLinkElementMethods;
-use dom::bindings::codegen::InheritTypes::HTMLLinkElementDerived;
+use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
+use dom::bindings::codegen::InheritTypes::{EventTargetCast, HTMLLinkElementDerived};
 use dom::bindings::codegen::InheritTypes::{ElementCast, HTMLElementCast, NodeCast};
-use dom::bindings::js::{MutNullableJS, JSRef, Temporary, OptionalRootable};
-use dom::document::Document;
+use dom::bindings::global::GlobalRef;
+use dom::bindings::js::{JS, JSRef, MutNullableHeap, Rootable, Temporary};
+use dom::bindings::js::{OptionalRootable, RootedReference};
+use dom::bindings::refcounted::Trusted;
+use dom::document::{Document, DocumentHelpers};
 use dom::domtokenlist::DOMTokenList;
 use dom::element::{AttributeHandlers, Element};
+use dom::event::{EventBubbles, EventCancelable, Event, EventHelpers};
 use dom::eventtarget::{EventTarget, EventTargetTypeId};
 use dom::element::ElementTypeId;
 use dom::htmlelement::{HTMLElement, HTMLElementTypeId};
@@ -19,9 +25,9 @@ use dom::node::{Node, NodeHelpers, NodeTypeId, window_from_node};
 use dom::virtualmethods::VirtualMethods;
 use dom::window::WindowHelpers;
 use layout_interface::{LayoutChan, Msg};
+use script_traits::StylesheetLoadResponder;
 use util::str::{DOMString, HTML_SPACE_CHARACTERS};
 use style::media_queries::parse_media_query_list;
-use style::node::TElement;
 use cssparser::Parser as CssParser;
 
 use std::ascii::AsciiExt;
@@ -33,7 +39,7 @@ use string_cache::Atom;
 #[dom_struct]
 pub struct HTMLLinkElement {
     htmlelement: HTMLElement,
-    rel_list: MutNullableJS<DOMTokenList>,
+    rel_list: MutNullableHeap<JS<DOMTokenList>>,
 }
 
 impl HTMLLinkElementDerived for EventTarget {
@@ -59,19 +65,17 @@ impl HTMLLinkElement {
 
 fn get_attr(element: JSRef<Element>, local_name: &Atom) -> Option<String> {
     let elem = element.get_attribute(&ns!(""), local_name).root();
-    elem.map(|e| {
-        // FIXME(https://github.com/rust-lang/rust/issues/23338)
-        let e = e.r();
+    elem.r().map(|e| {
         let value = e.value();
-        value.as_slice().to_owned()
+        (**value).to_owned()
     })
 }
 
 fn is_stylesheet(value: &Option<String>) -> bool {
     match *value {
         Some(ref value) => {
-            value.as_slice().split(HTML_SPACE_CHARACTERS.as_slice())
-                .any(|s| s.as_slice().eq_ignore_ascii_case("stylesheet"))
+            value.split(HTML_SPACE_CHARACTERS)
+                .any(|s| s.eq_ignore_ascii_case("stylesheet"))
         },
         None => false,
     }
@@ -99,7 +103,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLLinkElement> {
         match (rel, attr.local_name()) {
             (ref rel, &atom!("href")) | (ref rel, &atom!("media")) => {
                 if is_stylesheet(rel) {
-                    self.handle_stylesheet_url(attr.value().as_slice());
+                    self.handle_stylesheet_url(&attr.value());
                 }
             }
             (_, _) => ()
@@ -126,7 +130,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLLinkElement> {
 
             match (rel, href) {
                 (ref rel, Some(ref href)) if is_stylesheet(rel) => {
-                    self.handle_stylesheet_url(href.as_slice());
+                    self.handle_stylesheet_url(href);
                 }
                 _ => {}
             }
@@ -146,12 +150,22 @@ impl<'a> PrivateHTMLLinkElementHelpers for JSRef<'a, HTMLLinkElement> {
             Ok(url) => {
                 let element: JSRef<Element> = ElementCast::from_ref(self);
 
-                let mq_str = element.get_attr(&ns!(""), &atom!("media")).unwrap_or("");
+                let mq_attribute = element.get_attribute(&ns!(""), &atom!("media")).root();
+                let value = mq_attribute.r().map(|a| a.value());
+                let mq_str = match value {
+                    Some(ref value) => &***value,
+                    None => "",
+                };
                 let mut css_parser = CssParser::new(&mq_str);
                 let media = parse_media_query_list(&mut css_parser);
 
+                let doc = window.Document().root();
+                let link_element = Trusted::new(window.get_cx(), self, window.script_chan().clone());
+                let load_dispatcher = StylesheetLoadDispatcher::new(link_element);
+
+                let pending = doc.r().prepare_async_load(LoadType::Stylesheet(url.clone()));
                 let LayoutChan(ref layout_chan) = window.layout_chan();
-                layout_chan.send(Msg::LoadStylesheet(url, media)).unwrap();
+                layout_chan.send(Msg::LoadStylesheet(url, media, pending, box load_dispatcher)).unwrap();
             }
             Err(e) => debug!("Parsing url {} failed: {}", href, e)
         }
@@ -178,5 +192,29 @@ impl<'a> HTMLLinkElementMethods for JSRef<'a, HTMLLinkElement> {
         self.rel_list.or_init(|| {
             DOMTokenList::new(ElementCast::from_ref(self), &atom!("rel"))
         })
+    }
+}
+
+pub struct StylesheetLoadDispatcher {
+    elem: Trusted<HTMLLinkElement>,
+}
+
+impl StylesheetLoadDispatcher {
+    pub fn new(elem: Trusted<HTMLLinkElement>) -> StylesheetLoadDispatcher {
+        StylesheetLoadDispatcher {
+            elem: elem,
+        }
+    }
+}
+
+impl StylesheetLoadResponder for StylesheetLoadDispatcher {
+    fn respond(self: Box<StylesheetLoadDispatcher>) {
+        let elem = self.elem.to_temporary().root();
+        let window = window_from_node(elem.r()).root();
+        let event = Event::new(GlobalRef::Window(window.r()), "load".to_owned(),
+                               EventBubbles::DoesNotBubble,
+                               EventCancelable::NotCancelable).root();
+        let target = EventTargetCast::from_ref(elem.r());
+        event.r().fire(target);
     }
 }

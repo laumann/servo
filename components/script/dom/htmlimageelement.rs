@@ -9,7 +9,7 @@ use dom::bindings::codegen::Bindings::HTMLImageElementBinding;
 use dom::bindings::codegen::Bindings::HTMLImageElementBinding::HTMLImageElementMethods;
 use dom::bindings::codegen::InheritTypes::{NodeCast, ElementCast, EventTargetCast, HTMLElementCast, HTMLImageElementDerived};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JSRef, LayoutJS, Temporary};
+use dom::bindings::js::{JSRef, LayoutJS, Rootable, Temporary};
 use dom::bindings::refcounted::Trusted;
 use dom::document::{Document, DocumentHelpers};
 use dom::element::Element;
@@ -21,7 +21,6 @@ use dom::htmlelement::{HTMLElement, HTMLElementTypeId};
 use dom::node::{document_from_node, Node, NodeTypeId, NodeHelpers, NodeDamage, window_from_node};
 use dom::virtualmethods::VirtualMethods;
 use dom::window::WindowHelpers;
-use util::geometry::to_px;
 use util::str::DOMString;
 use string_cache::Atom;
 
@@ -116,7 +115,7 @@ impl<'a> PrivateHTMLImageElementHelpers for JSRef<'a, HTMLImageElement> {
                 *self.image.borrow_mut() = None;
             }
             Some((src, base_url)) => {
-                let img_url = UrlParser::new().base_url(base_url).parse(src.as_slice());
+                let img_url = UrlParser::new().base_url(base_url).parse(&src);
                 // FIXME: handle URL parse errors more gracefully.
                 let img_url = img_url.unwrap();
                 *self.url.borrow_mut() = Some(img_url.clone());
@@ -186,16 +185,9 @@ impl<'a> HTMLImageElementMethods for JSRef<'a, HTMLImageElement> {
     }
 
     fn Width(self) -> u32 {
-        // FIXME(pcwalton): This is a really nasty thing to do, but the interaction between the
-        // image cache task, the reflow messages that it sends to us via layout, and the image
-        // holders seem to just plain be racy, and this works around it by ensuring that we
-        // recreate the flow (picking up image changes on the way). The image cache task needs a
-        // rewrite to modern Rust.
         let node: JSRef<Node> = NodeCast::from_ref(self);
-        node.dirty(NodeDamage::OtherNodeDamage);
-
         let rect = node.get_bounding_content_box();
-        to_px(rect.size.width) as u32
+        rect.size.width.to_px() as u32
     }
 
     fn SetWidth(self, width: u32) {
@@ -204,16 +196,9 @@ impl<'a> HTMLImageElementMethods for JSRef<'a, HTMLImageElement> {
     }
 
     fn Height(self) -> u32 {
-        // FIXME(pcwalton): This is a really nasty thing to do, but the interaction between the
-        // image cache task, the reflow messages that it sends to us via layout, and the image
-        // holders seem to just plain be racy, and this works around it by ensuring that we
-        // recreate the flow (picking up image changes on the way). The image cache task needs a
-        // rewrite to modern Rust.
         let node: JSRef<Node> = NodeCast::from_ref(self);
-        node.dirty(NodeDamage::OtherNodeDamage);
-
         let rect = node.get_bounding_content_box();
-        to_px(rect.size.height) as u32
+        rect.size.height.to_px() as u32
     }
 
     fn SetHeight(self, height: u32) {
@@ -284,7 +269,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLImageElement> {
             &atom!("src") => {
                 let window = window_from_node(*self).root();
                 let url = window.r().get_url();
-                self.update_image(Some((attr.value().as_slice().to_owned(), &url)));
+                self.update_image(Some(((**attr.value()).to_owned(), &url)));
             },
             _ => ()
         }

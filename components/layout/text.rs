@@ -26,8 +26,8 @@ use style::properties::style_structs::Font as FontStyle;
 use util::geometry::Au;
 use util::linked_list::split_off_head;
 use util::logical_geometry::{LogicalSize, WritingMode};
-use util::range::Range;
-use util::smallvec::{SmallVec, SmallVec1};
+use util::range::{Range, RangeIndex};
+use util::smallvec::SmallVec1;
 
 /// A stack-allocated object for scanning an inline flow into `TextRun`-containing `TextFragment`s.
 pub struct TextRunScanner {
@@ -142,7 +142,7 @@ impl TextRunScanner {
                 };
 
                 let old_length = CharIndex(run_text.chars().count() as isize);
-                last_whitespace = util::transform_text(in_fragment.as_slice(),
+                last_whitespace = util::transform_text(&in_fragment,
                                                        compression,
                                                        last_whitespace,
                                                        &mut run_text);
@@ -185,7 +185,7 @@ impl TextRunScanner {
             };
 
             // FIXME(https://github.com/rust-lang/rust/issues/23338)
-            let mut font = fontgroup.fonts.get(0).borrow_mut();
+            let mut font = fontgroup.fonts[0].borrow_mut();
             Arc::new(box TextRun::new(&mut *font, run_text, &options))
         };
 
@@ -193,16 +193,25 @@ impl TextRunScanner {
         debug!("TextRunScanner: pushing {} fragment(s)", self.clump.len());
         for (logical_offset, old_fragment) in
                 mem::replace(&mut self.clump, LinkedList::new()).into_iter().enumerate() {
-            let range = *new_ranges.get(logical_offset);
+            let mut range = new_ranges[logical_offset];
             if range.is_empty() {
                 debug!("Elided an `SpecificFragmentInfo::UnscannedText` because it was \
                         zero-length after compression");
                 continue
             }
 
+            let requires_line_break_afterward_if_wrapping_on_newlines =
+                run.text.char_at_reverse(range.end().get() as usize) == '\n';
+            if requires_line_break_afterward_if_wrapping_on_newlines {
+                range.extend_by(CharIndex(-1))
+            }
+
             let text_size = old_fragment.border_box.size;
-            let mut new_text_fragment_info =
-                box ScannedTextFragmentInfo::new(run.clone(), range, text_size);
+            let mut new_text_fragment_info = box ScannedTextFragmentInfo::new(
+                run.clone(),
+                range,
+                text_size,
+                requires_line_break_afterward_if_wrapping_on_newlines);
             let new_metrics = new_text_fragment_info.run.metrics_for_range(&range);
             let bounding_box_size = bounding_box_for_run_metrics(&new_metrics,
                                                                  old_fragment.style.writing_mode);
@@ -229,14 +238,14 @@ impl TextRunScanner {
                 let length = string.len();
                 let original = mem::replace(string, String::with_capacity(length));
                 for character in original.chars() {
-                    string.push(character.to_uppercase())
+                    string.extend(character.to_uppercase())
                 }
             }
             text_transform::T::lowercase => {
                 let length = string.len();
                 let original = mem::replace(string, String::with_capacity(length));
                 for character in original.chars() {
-                    string.push(character.to_lowercase())
+                    string.extend(character.to_lowercase())
                 }
             }
             text_transform::T::capitalize => {
@@ -249,7 +258,7 @@ impl TextRunScanner {
                     //
                     //    http://dev.w3.org/csswg/css-text/#typographic-letter-unit
                     if capitalize_next_letter && character.is_alphabetic() {
-                        string.push(character.to_uppercase());
+                        string.extend(character.to_uppercase());
                         capitalize_next_letter = false;
                         continue
                     }
@@ -299,7 +308,7 @@ pub fn font_metrics_for_style(font_context: &mut FontContext, font_style: Arc<Fo
                               -> FontMetrics {
     let fontgroup = font_context.get_layout_font_group_for_style(font_style);
     // FIXME(https://github.com/rust-lang/rust/issues/23338)
-    let font = fontgroup.fonts.get(0).borrow();
+    let font = fontgroup.fonts[0].borrow();
     font.metrics.clone()
 }
 

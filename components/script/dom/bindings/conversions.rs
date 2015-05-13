@@ -56,15 +56,14 @@ use js::jsval::{UndefinedValue, NullValue, BooleanValue, Int32Value, UInt32Value
 use js::jsval::{StringValue, ObjectValue, ObjectOrNullValue};
 
 use libc;
+use num::Float;
 use std::borrow::ToOwned;
 use std::default;
-use std::marker::MarkerTrait;
-use std::num::Float;
 use std::slice;
 
 /// A trait to retrieve the constants necessary to check if a `JSObject`
 /// implements a given interface.
-pub trait IDLInterface: MarkerTrait {
+pub trait IDLInterface {
     /// Returns the prototype ID.
     fn get_prototype_id() -> PrototypeList::ID;
     /// Returns the prototype depth, i.e., the number of interfaces this
@@ -312,7 +311,7 @@ impl ToJSValConvertible for str {
 
 impl ToJSValConvertible for DOMString {
     fn to_jsval(&self, cx: *mut JSContext) -> JSVal {
-        self.as_slice().to_jsval(cx)
+        (**self).to_jsval(cx)
     }
 }
 
@@ -400,9 +399,8 @@ impl FromJSValConvertible for USVString {
 impl ToJSValConvertible for ByteString {
     fn to_jsval(&self, cx: *mut JSContext) -> JSVal {
         unsafe {
-            let slice = self.as_slice();
-            let jsstr = JS_NewStringCopyN(cx, slice.as_ptr() as *const libc::c_char,
-                                          slice.len() as libc::size_t);
+            let jsstr = JS_NewStringCopyN(cx, self.as_ptr() as *const libc::c_char,
+                                          self.len() as libc::size_t);
             if jsstr.is_null() {
                 panic!("JS_NewStringCopyN failed");
             }

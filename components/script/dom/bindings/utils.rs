@@ -9,7 +9,7 @@ use dom::bindings::codegen::PrototypeList::MAX_PROTO_CHAIN_LENGTH;
 use dom::bindings::conversions::{native_from_reflector_jsmanaged, is_dom_class};
 use dom::bindings::error::{Error, ErrorResult, Fallible, throw_type_error};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{Temporary, Root};
+use dom::bindings::js::{Temporary, Root, Rootable};
 use dom::browsercontext;
 use dom::window;
 use util::namespace;
@@ -17,7 +17,6 @@ use util::str::DOMString;
 
 use libc;
 use libc::c_uint;
-use std::borrow::ToOwned;
 use std::boxed;
 use std::cell::Cell;
 use std::ffi::CString;
@@ -130,7 +129,7 @@ pub struct NativePropertyHooks {
 }
 
 /// The struct that holds inheritance information for DOM object reflectors.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct DOMClass {
     /// A list of interfaces that this object implements, in order of decreasing
     /// derivedness.
@@ -148,6 +147,9 @@ pub struct DOMJSClass {
     pub base: js::Class,
     /// Associated data for DOM object reflectors.
     pub dom_class: DOMClass
+}
+impl Clone for DOMJSClass {
+    fn clone(&self) -> DOMJSClass { *self }
 }
 unsafe impl Sync for DOMJSClass {}
 
@@ -628,7 +630,7 @@ pub fn validate_qualified_name(qualified_name: &str) -> ErrorResult {
 /// Validate a namespace and qualified name and extract their parts.
 /// See https://dom.spec.whatwg.org/#validate-and-extract for details.
 pub fn validate_and_extract(namespace: Option<DOMString>, qualified_name: &str)
-                            -> Fallible<(Namespace, Option<DOMString>, Atom)> {
+                            -> Fallible<(Namespace, Option<Atom>, Atom)> {
     // Step 1.
     let namespace = namespace::from_domstring(namespace);
 
@@ -637,7 +639,7 @@ pub fn validate_and_extract(namespace: Option<DOMString>, qualified_name: &str)
 
     let (prefix, local_name) = if qualified_name.contains(":") {
         // Step 5.
-        let mut parts = qualified_name.splitn(1, ':');
+        let mut parts = qualified_name.splitn(2, ':');
         let prefix = parts.next().unwrap();
         debug_assert!(!prefix.is_empty());
         let local_name = parts.next().unwrap();
@@ -667,7 +669,7 @@ pub fn validate_and_extract(namespace: Option<DOMString>, qualified_name: &str)
         },
         (ns, p) => {
             // Step 10.
-            Ok((ns, p.map(|s| s.to_owned()), Atom::from_slice(local_name)))
+            Ok((ns, p.map(Atom::from_slice), Atom::from_slice(local_name)))
         }
     }
 }

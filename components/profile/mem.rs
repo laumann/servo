@@ -4,82 +4,14 @@
 
 //! Memory profiling functions.
 
+use profile_traits::mem::{ProfilerChan, ProfilerMsg, Reporter, ReportsChan};
 use self::system_reporter::SystemReporter;
 use std::borrow::ToOwned;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::old_io::timer::sleep;
-use std::sync::mpsc::{Sender, channel, Receiver};
-use std::time::duration::Duration;
+use std::thread::sleep_ms;
+use std::sync::mpsc::{channel, Receiver};
 use util::task::spawn_named;
-
-#[derive(Clone)]
-pub struct ProfilerChan(pub Sender<ProfilerMsg>);
-
-impl ProfilerChan {
-    pub fn send(&self, msg: ProfilerMsg) {
-        let ProfilerChan(ref c) = *self;
-        c.send(msg).unwrap();
-    }
-}
-
-/// An easy way to build a path for a report.
-#[macro_export]
-macro_rules! path {
-    ($($x:expr),*) => {{
-        use std::borrow::ToOwned;
-        vec![$( $x.to_owned() ),*]
-    }}
-}
-
-/// A single memory-related measurement.
-pub struct Report {
-    /// The identifying path for this report.
-    pub path: Vec<String>,
-
-    /// The size, in bytes.
-    pub size: usize,
-}
-
-/// A channel through which memory reports can be sent.
-#[derive(Clone)]
-pub struct ReportsChan(pub Sender<Vec<Report>>);
-
-impl ReportsChan {
-    pub fn send(&self, report: Vec<Report>) {
-        let ReportsChan(ref c) = *self;
-        c.send(report).unwrap();
-    }
-}
-
-/// A memory reporter is capable of measuring some data structure of interest. Because it needs
-/// to be passed to and registered with the Profiler, it's typically a "small" (i.e. easily
-/// cloneable) value that provides access to a "large" data structure, e.g. a channel that can
-/// inject a request for measurements into the event queue associated with the "large" data
-/// structure.
-pub trait Reporter {
-    /// Collect one or more memory reports. Returns true on success, and false on failure.
-    fn collect_reports(&self, reports_chan: ReportsChan) -> bool;
-}
-
-/// Messages that can be sent to the memory profiler thread.
-pub enum ProfilerMsg {
-    /// Register a Reporter with the memory profiler. The String is only used to identify the
-    /// reporter so it can be unregistered later. The String must be distinct from that used by any
-    /// other registered reporter otherwise a panic will occur.
-    RegisterReporter(String, Box<Reporter + Send>),
-
-    /// Unregister a Reporter with the memory profiler. The String must match the name given when
-    /// the reporter was registered. If the String does not match the name of a registered reporter
-    /// a panic will occur.
-    UnregisterReporter(String),
-
-    /// Triggers printing of the memory profiling metrics.
-    Print,
-
-    /// Tells the memory profiler to shut down.
-    Exit,
-}
 
 pub struct Profiler {
     /// The port through which messages are received.
@@ -95,11 +27,11 @@ impl Profiler {
 
         // Create the timer thread if a period was provided.
         if let Some(period) = period {
-            let period_ms = Duration::milliseconds((period * 1000f64) as i64);
+            let period_ms = (period * 1000.) as u32;
             let chan = chan.clone();
             spawn_named("Memory profiler timer".to_owned(), move || {
                 loop {
-                    sleep(period_ms);
+                    sleep_ms(period_ms);
                     if chan.send(ProfilerMsg::Print).is_err() {
                         break;
                     }
@@ -363,11 +295,11 @@ impl ReportsForest {
 
 mod system_reporter {
     use libc::{c_char, c_int, c_void, size_t};
+    use profile_traits::mem::{Report, Reporter, ReportsChan};
     use std::borrow::ToOwned;
     use std::ffi::CString;
     use std::mem::size_of;
     use std::ptr::null_mut;
-    use super::{Report, Reporter, ReportsChan};
     #[cfg(target_os="macos")]
     use task_info::task_basic_info::{virtual_size, resident_size};
 
@@ -511,7 +443,7 @@ mod system_reporter {
         let mut f = option_try!(File::open("/proc/self/statm").ok());
         let mut contents = String::new();
         option_try!(f.read_to_string(&mut contents).ok());
-        let s = option_try!(contents.words().nth(field));
+        let s = option_try!(contents.split_whitespace().nth(field));
         let npages = option_try!(s.parse::<usize>().ok());
         Some(npages * ::std::env::page_size())
     }
@@ -552,7 +484,7 @@ mod system_reporter {
         use std::collections::HashMap;
         use std::collections::hash_map::Entry;
         use std::fs::File;
-        use std::io::{BufReader, BufReadExt};
+        use std::io::{BufReader, BufRead};
 
         // The first line of an entry in /proc/<pid>/smaps looks just like an entry
         // in /proc/<pid>/maps:
@@ -592,7 +524,7 @@ mod system_reporter {
             };
             if looking_for == LookingFor::Segment {
                 // Look for a segment info line.
-                let cap = match seg_re.captures(line.as_slice()) {
+                let cap = match seg_re.captures(&line) {
                     Some(cap) => cap,
                     None => continue,
                 };
@@ -617,7 +549,7 @@ mod system_reporter {
                 looking_for = LookingFor::Rss;
             } else {
                 // Look for an "Rss:" line.
-                let cap = match rss_re.captures(line.as_slice()) {
+                let cap = match rss_re.captures(&line) {
                     Some(cap) => cap,
                     None => continue,
                 };

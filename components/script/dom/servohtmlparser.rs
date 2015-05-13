@@ -9,7 +9,7 @@ use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::ServoHTMLParserBinding;
 use dom::bindings::global::GlobalRef;
 use dom::bindings::trace::JSTraceable;
-use dom::bindings::js::{JS, JSRef, Temporary};
+use dom::bindings::js::{JS, JSRef, Rootable, Temporary};
 use dom::bindings::utils::{Reflectable, Reflector, reflect_dom_object};
 use dom::document::{Document, DocumentHelpers};
 use dom::node::Node;
@@ -33,7 +33,7 @@ pub struct Sink {
 
 /// FragmentContext is used only to pass this group of related values
 /// into functions.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct FragmentContext<'a> {
     pub context_elem: JSRef<'a, Node>,
     pub form_elem: Option<JSRef<'a, Node>>,

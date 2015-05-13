@@ -8,7 +8,7 @@ use dom::bindings::codegen::Bindings::DOMTokenListBinding::DOMTokenListMethods;
 use dom::bindings::error::{ErrorResult, Fallible};
 use dom::bindings::error::Error::{InvalidCharacter, Syntax};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, JSRef, Temporary, OptionalRootable};
+use dom::bindings::js::{JS, JSRef, OptionalRootable, Rootable, Temporary};
 use dom::bindings::utils::{Reflector, reflect_dom_object};
 use dom::element::{Element, AttributeHandlers};
 use dom::node::window_from_node;
@@ -81,7 +81,7 @@ impl<'a> DOMTokenListMethods for JSRef<'a, DOMTokenList> {
             let attr = attr.r();
             let value = attr.value();
             value.tokens().and_then(|tokens| {
-                tokens.get(index as usize).map(|token| token.as_slice().to_owned())
+                tokens.get(index as usize).map(|token| (**token).to_owned())
             })
         })
     }
@@ -158,5 +158,10 @@ impl<'a> DOMTokenListMethods for JSRef<'a, DOMTokenList> {
                 }
             }
         }
+    }
+
+    // https://dom.spec.whatwg.org/#stringification-behavior
+    fn Stringifier(self) -> DOMString {
+        self.element.root().r().get_string_attribute(&self.local_name)
     }
 }

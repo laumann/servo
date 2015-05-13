@@ -8,7 +8,7 @@ use dom::bindings::codegen::Bindings::HTMLBodyElementBinding::{self, HTMLBodyEle
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::InheritTypes::EventTargetCast;
 use dom::bindings::codegen::InheritTypes::{HTMLBodyElementDerived, HTMLElementCast};
-use dom::bindings::js::{JSRef, Temporary};
+use dom::bindings::js::{JSRef, Rootable, Temporary};
 use dom::bindings::utils::Reflectable;
 use dom::document::Document;
 use dom::element::ElementTypeId;
@@ -19,6 +19,7 @@ use dom::virtualmethods::VirtualMethods;
 use dom::window::WindowHelpers;
 
 use cssparser::RGBA;
+use string_cache::Atom;
 use util::str::{self, DOMString};
 
 use std::borrow::ToOwned;
@@ -57,6 +58,11 @@ impl HTMLBodyElement {
 }
 
 impl<'a> HTMLBodyElementMethods for JSRef<'a, HTMLBodyElement> {
+
+    // https://html.spec.whatwg.org/#dom-body-bgcolor
+    make_getter!(BgColor, "bgcolor");
+    make_setter!(SetBgColor, "bgcolor");
+
     fn GetOnunload(self) -> Option<EventHandlerNonNull> {
         let win = window_from_node(self).root();
         win.r().GetOnunload()
@@ -89,7 +95,7 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLBodyElement> {
             s.after_set_attr(attr);
         }
 
-        let name = attr.local_name().as_slice();
+        let name = attr.local_name();
         if name.starts_with("on") {
             static FORWARDED_EVENTS: &'static [&'static str] =
                 &["onfocus", "onload", "onscroll", "onafterprint", "onbeforeprint",
@@ -101,19 +107,19 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLBodyElement> {
                                         window.r().get_url(),
                                         window.r().reflector().get_jsobject());
             let evtarget: JSRef<EventTarget> =
-                if FORWARDED_EVENTS.iter().any(|&event| name == event) {
+                if FORWARDED_EVENTS.iter().any(|&event| &**name == event) {
                     EventTargetCast::from_ref(window.r())
                 } else {
                     EventTargetCast::from_ref(*self)
                 };
             evtarget.set_event_handler_uncompiled(cx, url, reflector,
                                                   &name[2..],
-                                                  attr.value().as_slice().to_owned());
+                                                  (**attr.value()).to_owned());
         }
 
         match attr.local_name() {
             &atom!("bgcolor") => {
-                self.background_color.set(str::parse_legacy_color(attr.value().as_slice()).ok())
+                self.background_color.set(str::parse_legacy_color(&attr.value()).ok())
             }
             _ => {}
         }

@@ -12,11 +12,12 @@ use geom::point::Point2D;
 use geom::rect::Rect;
 use libc::uintptr_t;
 use msg::constellation_msg::{PipelineExitType, WindowSizeData};
-use profile::mem::{Reporter, ReportsChan};
+use net_traits::PendingAsyncLoad;
+use profile_traits::mem::{Reporter, ReportsChan};
 use script_traits::{ScriptControlChan, OpaqueScriptLayoutChannel, UntrustedNodeAddress};
+use script_traits::StylesheetLoadResponder;
 use std::any::Any;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::boxed::BoxAny;
 use style::animation::PropertyAnimation;
 use style::media_queries::MediaQueryList;
 use style::stylesheets::Stylesheet;
@@ -31,7 +32,7 @@ pub enum Msg {
     AddStylesheet(Stylesheet, MediaQueryList),
 
     /// Adds the given stylesheet to the document.
-    LoadStylesheet(Url, MediaQueryList),
+    LoadStylesheet(Url, MediaQueryList, PendingAsyncLoad, Box<StylesheetLoadResponder+Send>),
 
     /// Puts a document into quirks mode, causing the quirks mode stylesheet to be loaded.
     SetQuirksMode,
@@ -88,7 +89,7 @@ pub struct HitTestResponse(pub UntrustedNodeAddress);
 pub struct MouseOverResponse(pub Vec<UntrustedNodeAddress>);
 
 /// Why we're doing reflow.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub enum ReflowGoal {
     /// We're reflowing in order to send a display list to the screen.
     ForDisplay,
@@ -185,15 +186,15 @@ pub struct Animation {
     /// A description of the property animation that is occurring.
     pub property_animation: PropertyAnimation,
     /// The start time of the animation, as returned by `time::precise_time_s()`.
-    pub start_time: f64,
+    pub start_time: f32,
     /// The end time of the animation, as returned by `time::precise_time_s()`.
-    pub end_time: f64,
+    pub end_time: f32,
 }
 
 impl Animation {
     /// Returns the duration of this animation in seconds.
     #[inline]
-    pub fn duration(&self) -> f64 {
+    pub fn duration(&self) -> f32 {
         self.end_time - self.start_time
     }
 }

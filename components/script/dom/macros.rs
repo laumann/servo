@@ -39,7 +39,7 @@ macro_rules! make_bool_getter(
 
 #[macro_export]
 macro_rules! make_uint_getter(
-    ( $attr:ident, $htmlname:expr ) => (
+    ($attr:ident, $htmlname:expr, $default:expr) => (
         fn $attr(self) -> u32 {
             use dom::element::{Element, AttributeHandlers};
             use dom::bindings::codegen::InheritTypes::ElementCast;
@@ -47,9 +47,12 @@ macro_rules! make_uint_getter(
             use std::ascii::AsciiExt;
             let element: JSRef<Element> = ElementCast::from_ref(self);
             // FIXME(pcwalton): Do this at compile time, not runtime.
-            element.get_uint_attribute(&Atom::from_slice($htmlname))
+            element.get_uint_attribute(&Atom::from_slice($htmlname), $default)
         }
     );
+    ($attr:ident, $htmlname:expr) => {
+        make_uint_getter!($attr, $htmlname, 0);
+    };
     ($attr:ident) => {
         make_uint_getter!($attr, to_lower!(stringify!($attr)));
     }
@@ -85,12 +88,11 @@ macro_rules! make_url_or_base_getter(
             use std::ascii::AsciiExt;
             let element: JSRef<Element> = ElementCast::from_ref(self);
             let url = element.get_url_attribute(&Atom::from_slice($htmlname));
-            match url.as_slice() {
-                "" => {
-                    let window = window_from_node(self).root();
-                    window.r().get_url().serialize()
-                },
-                _ => url
+            if url.is_empty() {
+                let window = window_from_node(self).root();
+                window.r().get_url().serialize()
+            } else {
+                url
             }
         }
     );
@@ -112,14 +114,14 @@ macro_rules! make_enumerated_getter(
             let val = element.get_string_attribute(&Atom::from_slice($htmlname))
                              .into_ascii_lowercase();
             // https://html.spec.whatwg.org/multipage/#attr-fs-method
-            match val.as_slice() {
+            match &*val {
                 $($choices)|+ => val,
                 _ => $default.to_owned()
             }
         }
     );
     ($attr:ident, $default:expr, $(($choices: pat))|+) => {
-        make_enumerated_getter!($attr, to_lower!(stringify!($attr)).as_slice(), $default, $(($choices))|+);
+        make_enumerated_getter!($attr, &to_lower!(stringify!($attr)), $default, $(($choices))|+);
     }
 );
 
@@ -153,15 +155,51 @@ macro_rules! make_bool_setter(
 
 #[macro_export]
 macro_rules! make_uint_setter(
-    ( $attr:ident, $htmlname:expr ) => (
+    ($attr:ident, $htmlname:expr, $default:expr) => (
         fn $attr(self, value: u32) {
             use dom::element::{Element, AttributeHandlers};
             use dom::bindings::codegen::InheritTypes::ElementCast;
+            let value = if value > 2147483647 {
+                $default
+            } else {
+                value
+            };
             let element: JSRef<Element> = ElementCast::from_ref(self);
             // FIXME(pcwalton): Do this at compile time, not at runtime.
             element.set_uint_attribute(&Atom::from_slice($htmlname), value)
         }
     );
+    ($attr:ident, $htmlname:expr) => {
+        make_uint_setter!($attr, $htmlname, 0);
+    };
+);
+
+#[macro_export]
+macro_rules! make_limited_uint_setter(
+    ($attr:ident, $htmlname:expr, $default:expr) => (
+        fn $attr(self, value: u32) -> $crate::dom::bindings::error::ErrorResult {
+            use dom::element::AttributeHandlers;
+            use dom::bindings::codegen::InheritTypes::ElementCast;
+            use string_cache::Atom;
+            let value = if value == 0 {
+                return Err($crate::dom::bindings::error::Error::IndexSize);
+            } else if value > 2147483647 {
+                $default
+            } else {
+                value
+            };
+            let element = ElementCast::from_ref(self);
+            // FIXME(pcwalton): Do this at compile time, not runtime.
+            element.set_uint_attribute(&Atom::from_slice($htmlname), value);
+            Ok(())
+        }
+    );
+    ($attr:ident, $htmlname:expr) => {
+        make_limited_uint_setter!($attr, $htmlname, 1);
+    };
+    ($attr:ident) => {
+        make_limited_uint_setter!($attr, to_lower!(stringify!($attr)));
+    };
 );
 
 /// For use on non-jsmanaged types

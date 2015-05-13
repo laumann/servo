@@ -19,18 +19,20 @@
 
 #![allow(unsafe_code)]
 
+use document_loader::{LoadType, DocumentLoader, NotifierData};
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::DocumentBinding::{DocumentMethods, DocumentReadyState};
 use dom::bindings::codegen::InheritTypes::{ElementCast, EventTargetCast, HTMLIFrameElementCast, NodeCast, EventCast};
 use dom::bindings::conversions::FromJSValConvertible;
 use dom::bindings::conversions::StringificationBehavior;
-use dom::bindings::js::{JS, JSRef, Temporary, OptionalRootable, RootedReference};
-use dom::bindings::js::{RootCollection, RootCollectionPtr};
+use dom::bindings::js::{JS, JSRef, OptionalRootable, RootCollection};
+use dom::bindings::js::{RootCollectionPtr, Rootable, RootedReference};
+use dom::bindings::js::Temporary;
 use dom::bindings::refcounted::{LiveDOMReferences, Trusted, TrustedReference};
 use dom::bindings::structuredclone::StructuredCloneData;
 use dom::bindings::trace::{JSTraceable, trace_collections, RootedVec};
 use dom::bindings::utils::{wrap_for_same_compartment, pre_wrap};
-use dom::document::{Document, IsHTMLDocument, DocumentHelpers, DocumentProgressHandler, DocumentProgressTask, DocumentSource};
+use dom::document::{Document, IsHTMLDocument, DocumentHelpers, DocumentProgressHandler, DocumentProgressTask, DocumentSource, MouseEventType};
 use dom::element::{Element, AttributeHandlers};
 use dom::event::{Event, EventHelpers, EventBubbles, EventCancelable};
 use dom::htmliframeelement::{HTMLIFrameElement, HTMLIFrameElementHelpers};
@@ -50,7 +52,7 @@ use webdriver_handlers;
 use devtools_traits::{DevtoolsControlChan, DevtoolsControlPort, DevtoolsPageInfo};
 use devtools_traits::{DevtoolsControlMsg, DevtoolScriptControlMsg};
 use devtools_traits::{TimelineMarker, TimelineMarkerType, TracingMetadata};
-use script_traits::CompositorEvent;
+use script_traits::{CompositorEvent, MouseButton};
 use script_traits::CompositorEvent::{ResizeEvent, ClickEvent};
 use script_traits::CompositorEvent::{MouseDownEvent, MouseUpEvent};
 use script_traits::CompositorEvent::{MouseMoveEvent, KeyEvent};
@@ -64,13 +66,11 @@ use msg::constellation_msg::{ConstellationChan, FocusType};
 use msg::constellation_msg::{LoadData, PipelineId, SubpageId, MozBrowserEvent, WorkerId};
 use msg::constellation_msg::{Failure, WindowSizeData, PipelineExitType};
 use msg::constellation_msg::Msg as ConstellationMsg;
-use net_traits::{ResourceTask, ControlMsg, LoadResponse, LoadConsumer};
+use net_traits::{ResourceTask, LoadResponse, LoadConsumer, ControlMsg};
 use net_traits::LoadData as NetLoadData;
 use net_traits::image_cache_task::{ImageCacheChan, ImageCacheTask, ImageCacheResult};
 use net_traits::storage_task::StorageTask;
 use string_cache::Atom;
-use util::geometry::to_frac_px;
-use util::smallvec::SmallVec;
 use util::str::DOMString;
 use util::task::{spawn_named, spawn_named_with_send_on_failure};
 use util::task_state;
@@ -81,7 +81,7 @@ use hyper::header::{LastModified, Headers};
 use js::jsapi::{JS_SetWrapObjectCallbacks, JS_SetExtraGCRootsTracer};
 use js::jsapi::{JSContext, JSRuntime, JSObject, JSTracer};
 use js::jsapi::{JS_SetGCCallback, JSGCStatus, JSGC_BEGIN, JSGC_END};
-use js::rust::{Runtime, RtUtils};
+use js::rust::Runtime;
 use url::Url;
 
 use libc;
@@ -89,7 +89,6 @@ use std::any::Any;
 use std::borrow::ToOwned;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::num::ToPrimitive;
 use std::option::Option;
 use std::ptr;
 use std::rc::Rc;
@@ -97,7 +96,7 @@ use std::result::Result;
 use std::sync::mpsc::{channel, Sender, Receiver, Select};
 use time::Tm;
 
-use hyper::header::ContentType;
+use hyper::header::{ContentType, HttpDate};
 use hyper::mime::{Mime, TopLevel, SubLevel};
 
 thread_local!(pub static STACK_ROOTS: Cell<Option<RootCollectionPtr>> = Cell::new(None));
@@ -151,7 +150,7 @@ impl InProgressLoad {
     }
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub enum TimerSource {
     FromWindow(PipelineId),
     FromWorker
@@ -192,6 +191,8 @@ pub enum ScriptMsg {
     RefcountCleanup(TrustedReference),
     /// The final network response for a page has arrived.
     PageFetchComplete(PipelineId, Option<SubpageId>, LoadResponse),
+    /// Notify a document that all pending loads are complete.
+    DocumentLoadsComplete(PipelineId),
 }
 
 /// A cloneable interface for communicating with an event loop.
@@ -265,8 +266,6 @@ impl Drop for StackRootTLS {
 
 /// Information for an entire page. Pages are top-level browsing contexts and can contain multiple
 /// frames.
-///
-/// FIXME: Rename to `Page`, following WebKit?
 #[jstraceable]
 pub struct ScriptTask {
     /// A handle to the information pertaining to page layout
@@ -316,7 +315,7 @@ pub struct ScriptTask {
     devtools_marker_sender: RefCell<Option<Sender<TimelineMarker>>>,
 
     /// The JavaScript runtime.
-    js_runtime: Runtime,
+    js_runtime: Rc<Runtime>,
 
     mouse_over_targets: DOMRefCell<Vec<JS<Node>>>
 }
@@ -341,7 +340,6 @@ impl<'a> ScriptMemoryFailsafe<'a> {
     }
 }
 
-#[unsafe_destructor]
 impl<'a> Drop for ScriptMemoryFailsafe<'a> {
     #[allow(unrooted_must_root)]
     fn drop(&mut self) {
@@ -351,7 +349,7 @@ impl<'a> Drop for ScriptMemoryFailsafe<'a> {
                     let page = owner.page.borrow_for_script_deallocation();
                     for page in page.iter() {
                         let window = page.window_for_script_deallocation();
-                        (*window.unsafe_get()).clear_js_context_for_script_deallocation();
+                        (*window.unsafe_get()).clear_js_runtime_for_script_deallocation();
                     }
                 }
             }
@@ -496,7 +494,7 @@ impl ScriptTask {
             devtools_markers: RefCell::new(HashSet::new()),
             devtools_marker_sender: RefCell::new(None),
 
-            js_runtime: runtime,
+            js_runtime: Rc::new(runtime),
             mouse_over_targets: DOMRefCell::new(vec!())
         }
     }
@@ -717,9 +715,9 @@ impl ScriptTask {
                 self.handle_freeze_msg(pipeline_id),
             ConstellationControlMsg::Thaw(pipeline_id) =>
                 self.handle_thaw_msg(pipeline_id),
-            ConstellationControlMsg::MozBrowserEventMsg(parent_pipeline_id,
-                                                        subpage_id,
-                                                        event) =>
+            ConstellationControlMsg::MozBrowserEvent(parent_pipeline_id,
+                                                     subpage_id,
+                                                     event) =>
                 self.handle_mozbrowser_event_msg(parent_pipeline_id,
                                                  subpage_id,
                                                  event),
@@ -727,10 +725,15 @@ impl ScriptTask {
                                                      old_subpage_id,
                                                      new_subpage_id) =>
                 self.handle_update_subpage_id(containing_pipeline_id, old_subpage_id, new_subpage_id),
-            ConstellationControlMsg::FocusIFrameMsg(containing_pipeline_id, subpage_id) =>
+            ConstellationControlMsg::FocusIFrame(containing_pipeline_id, subpage_id) =>
                 self.handle_focus_iframe_msg(containing_pipeline_id, subpage_id),
-            ConstellationControlMsg::WebDriverCommandMsg(pipeline_id, msg) => {
-                self.handle_webdriver_msg(pipeline_id, msg);
+            ConstellationControlMsg::WebDriverCommand(pipeline_id, msg) =>
+                self.handle_webdriver_msg(pipeline_id, msg),
+            ConstellationControlMsg::TickAllAnimations(pipeline_id) =>
+                self.handle_tick_all_animations(pipeline_id),
+            ConstellationControlMsg::StylesheetLoadComplete(id, url, responder) => {
+                responder.respond();
+                self.handle_resource_loaded(id, LoadType::Stylesheet(url));
             }
         }
     }
@@ -757,6 +760,8 @@ impl ScriptTask {
                 LiveDOMReferences::cleanup(self.get_cx(), addr),
             ScriptMsg::PageFetchComplete(id, subpage, response) =>
                 self.handle_page_fetch_complete(id, subpage, response),
+            ScriptMsg::DocumentLoadsComplete(id) =>
+                self.handle_loads_complete(id),
         }
     }
 
@@ -781,6 +786,8 @@ impl ScriptTask {
                 devtools::handle_set_timeline_markers(&page, self, marker_types, reply),
             DevtoolScriptControlMsg::DropTimelineMarkers(_pipeline_id, marker_types) =>
                 devtools::handle_drop_timeline_markers(&page, self, marker_types),
+            DevtoolScriptControlMsg::RequestAnimationFrame(pipeline_id, callback) =>
+                devtools::handle_request_animation_frame(&page, pipeline_id, callback),
         }
     }
 
@@ -792,7 +799,19 @@ impl ScriptTask {
         let page = self.root_page();
         match msg {
             WebDriverScriptCommand::EvaluateJS(script, reply) =>
-                webdriver_handlers::handle_evaluate_js(&page, pipeline_id, script, reply)
+                webdriver_handlers::handle_evaluate_js(&page, pipeline_id, script, reply),
+            WebDriverScriptCommand::FindElementCSS(selector, reply) =>
+                webdriver_handlers::handle_find_element_css(&page, pipeline_id, selector, reply),
+            WebDriverScriptCommand::FindElementsCSS(selector, reply) =>
+                webdriver_handlers::handle_find_elements_css(&page, pipeline_id, selector, reply),
+            WebDriverScriptCommand::GetActiveElement(reply) =>
+                webdriver_handlers::handle_get_active_element(&page, pipeline_id, reply),
+            WebDriverScriptCommand::GetElementTagName(node_id, reply) =>
+                webdriver_handlers::handle_get_name(&page, pipeline_id, node_id, reply),
+            WebDriverScriptCommand::GetElementText(node_id, reply) =>
+                webdriver_handlers::handle_get_text(&page, pipeline_id, node_id, reply),
+            WebDriverScriptCommand::GetTitle(reply) =>
+                webdriver_handlers::handle_get_title(&page, pipeline_id, reply)
         }
     }
 
@@ -820,7 +839,7 @@ impl ScriptTask {
                 let window = inner_page.window().root();
                 if window.r().set_page_clip_rect_with_new_viewport(rect) {
                     let page = get_page(page, id);
-                    self.force_reflow(&*page, ReflowReason::Viewport);
+                    self.rebuild_and_force_reflow(&*page, ReflowReason::Viewport);
                 }
                 return;
             }
@@ -834,6 +853,12 @@ impl ScriptTask {
     }
 
     /// Handle a request to load a page in a new child frame of an existing page.
+    fn handle_resource_loaded(&self, pipeline: PipelineId, load: LoadType) {
+        let page = get_page(&self.root_page(), pipeline);
+        let doc = page.document().root();
+        doc.r().finish_load(load);
+    }
+
     fn handle_new_layout(&self, new_layout_info: NewLayoutInfo) {
         let NewLayoutInfo {
             containing_pipeline_id,
@@ -856,6 +881,25 @@ impl ScriptTask {
                                            layout_chan, parent_window.r().window_size(),
                                            load_data.url.clone());
         self.start_page_load(new_load, load_data);
+    }
+
+    fn handle_loads_complete(&self, pipeline: PipelineId) {
+        let page = get_page(&self.root_page(), pipeline);
+        let doc = page.document().root();
+        let doc = doc.r();
+        if doc.loader().is_blocked() {
+            return;
+        }
+
+        doc.mut_loader().inhibit_events();
+
+        // https://html.spec.whatwg.org/multipage/#the-end step 7
+        let addr: Trusted<Document> = Trusted::new(self.get_cx(), doc, self.chan.clone());
+        let handler = box DocumentProgressHandler::new(addr.clone(), DocumentProgressTask::Load);
+        self.chan.send(ScriptMsg::RunnableMsg(handler)).unwrap();
+
+        let ConstellationChan(ref chan) = self.constellation_chan;
+        chan.send(ConstellationMsg::LoadComplete).unwrap();
     }
 
     /// Handles a timer that fired.
@@ -884,7 +928,7 @@ impl ScriptTask {
 
         let needed_reflow = page.set_reflow_status(false);
         if needed_reflow {
-            self.force_reflow(&*page, ReflowReason::CachedPageNeededReflow);
+            self.rebuild_and_force_reflow(&*page, ReflowReason::CachedPageNeededReflow);
         }
 
         let window = page.window().root();
@@ -900,7 +944,7 @@ impl ScriptTask {
         let doc = page.document().root();
         let frame_element = self.find_iframe(doc.r(), subpage_id).root();
 
-        if let Some(frame_element) = frame_element {
+        if let Some(ref frame_element) = frame_element {
             let element: JSRef<Element> = ElementCast::from_ref(frame_element.r());
             doc.r().begin_focus_transaction();
             doc.r().request_focus(element);
@@ -921,7 +965,7 @@ impl ScriptTask {
             self.find_iframe(doc.r(), subpage_id)
         }).root();
 
-        if let Some(frame_element) = frame_element {
+        if let Some(ref frame_element) = frame_element {
             frame_element.r().dispatch_mozbrowser_event(event);
         }
     }
@@ -937,7 +981,7 @@ impl ScriptTask {
             self.find_iframe(doc.r(), old_subpage_id)
         }).root();
 
-        frame_element.unwrap().r().update_subpage_id(new_subpage_id);
+        frame_element.r().unwrap().update_subpage_id(new_subpage_id);
     }
 
     /// Handles a notification that reflow completed.
@@ -1021,6 +1065,13 @@ impl ScriptTask {
         false
     }
 
+    /// Handles when layout task finishes all animation in one tick
+    fn handle_tick_all_animations(&self, id: PipelineId) {
+        let page = get_page(&self.root_page(), id);
+        let document = page.document().root();
+        document.r().invoke_animation_callbacks();
+    }
+
     /// The entry point to document loading. Defines bindings, sets up the window and document
     /// objects, parses HTML and CSS, and kicks off initial layout.
     fn load(&self, response: LoadResponse, incomplete: InProgressLoad) {
@@ -1089,7 +1140,6 @@ impl ScriptTask {
                 self.neutered = true;
             }
         }
-        #[unsafe_destructor]
         impl<'a> Drop for AutoPageRemover<'a> {
             fn drop(&mut self) {
                 if !self.neutered {
@@ -1111,7 +1161,7 @@ impl ScriptTask {
         let mut page_remover = AutoPageRemover::new(self, page_to_remove);
 
         // Create the window and document objects.
-        let window = Window::new(self.js_runtime.cx.clone(),
+        let window = Window::new(self.js_runtime.clone(),
                                  page.clone(),
                                  self.chan.clone(),
                                  self.image_cache_channel.clone(),
@@ -1128,7 +1178,7 @@ impl ScriptTask {
                                  incomplete.window_size).root();
 
         let last_modified: Option<DOMString> = response.metadata.headers.as_ref().and_then(|headers| {
-            headers.get().map(|&LastModified(ref tm)| dom_last_modified(tm))
+            headers.get().map(|&LastModified(HttpDate(ref tm))| dom_last_modified(tm))
         });
 
         let content_type = match response.metadata.content_type {
@@ -1136,12 +1186,20 @@ impl ScriptTask {
             _ => None
         };
 
+        let notifier_data = NotifierData {
+            script_chan: self.chan.clone(),
+            pipeline: page.pipeline(),
+        };
+        let loader = DocumentLoader::new_with_task(self.resource_task.clone(),
+                                                   Some(notifier_data),
+                                                   Some(final_url.clone()));
         let document = Document::new(window.r(),
                                      Some(final_url.clone()),
                                      IsHTMLDocument::HTMLDocument,
                                      content_type,
                                      last_modified,
-                                     DocumentSource::FromParser).root();
+                                     DocumentSource::FromParser,
+                                     loader).root();
 
         let frame_element = frame_element.r().map(|elem| ElementCast::from_ref(elem));
         window.r().init_browser_context(document.r(), frame_element);
@@ -1164,40 +1222,7 @@ impl ScriptTask {
         };
 
         parse_html(document.r(), parse_input, &final_url, None);
-
-        document.r().set_ready_state(DocumentReadyState::Interactive);
-        self.compositor.borrow_mut().set_ready_state(incomplete.pipeline_id, PerformingLayout);
-
-        // Kick off the initial reflow of the page.
-        debug!("kicking off initial reflow of {:?}", final_url);
-        document.r().content_changed(NodeCast::from_ref(document.r()),
-                                     NodeDamage::OtherNodeDamage);
-        window.r().reflow(ReflowGoal::ForDisplay, ReflowQueryType::NoQuery, ReflowReason::FirstLoad);
-
-        // No more reflow required
-        page.set_reflow_status(false);
-
-        // https://html.spec.whatwg.org/multipage/#the-end step 4
-        let addr: Trusted<Document> = Trusted::new(self.get_cx(), document.r(), self.chan.clone());
-        let handler = box DocumentProgressHandler::new(addr.clone(), DocumentProgressTask::DOMContentLoaded);
-        self.chan.send(ScriptMsg::RunnableMsg(handler)).unwrap();
-
-        // We have no concept of a document loader right now, so just dispatch the
-        // "load" event as soon as we've finished executing all scripts parsed during
-        // the initial load.
-
-        // https://html.spec.whatwg.org/multipage/#the-end step 7
-        let handler = box DocumentProgressHandler::new(addr, DocumentProgressTask::Load);
-        self.chan.send(ScriptMsg::RunnableMsg(handler)).unwrap();
-
-        window.r().set_fragment_name(final_url.fragment.clone());
-
-        let ConstellationChan(ref chan) = self.constellation_chan;
-        chan.send(ConstellationMsg::LoadComplete).unwrap();
-
-        // Notify devtools that a new script global exists.
-        self.notify_devtools(document.r().Title(), final_url, (incomplete.pipeline_id, None));
-
+        self.handle_parsing_complete(incomplete.pipeline_id);
         page_remover.neuter();
     }
 
@@ -1219,8 +1244,7 @@ impl ScriptTask {
     fn scroll_fragment_point(&self, pipeline_id: PipelineId, node: JSRef<Element>) {
         let node: JSRef<Node> = NodeCast::from_ref(node);
         let rect = node.get_bounding_content_box();
-        let point = Point2D(to_frac_px(rect.origin.x).to_f32().unwrap(),
-                            to_frac_px(rect.origin.y).to_f32().unwrap());
+        let point = Point2D(rect.origin.x.to_f32_px(), rect.origin.y.to_f32_px());
         // FIXME(#2003, pcwalton): This is pretty bogus when multiple layers are involved.
         // Really what needs to happen is that this needs to go through layout to ask which
         // layer the element belongs to, and have it send the scroll message to the
@@ -1228,8 +1252,8 @@ impl ScriptTask {
         self.compositor.borrow_mut().scroll_fragment_point(pipeline_id, LayerId::null(), point);
     }
 
-    /// Reflows non-incrementally.
-    fn force_reflow(&self, page: &Page, reason: ReflowReason) {
+    /// Reflows non-incrementally, rebuilding the entire layout tree in the process.
+    fn rebuild_and_force_reflow(&self, page: &Page, reason: ReflowReason) {
         let document = page.document().root();
         document.r().dirty_all_nodes();
         let window = window_from_node(document.r()).root();
@@ -1262,17 +1286,17 @@ impl ScriptTask {
             }
 
             ClickEvent(button, point) => {
-                let _marker;
-                if self.need_emit_timeline_marker(TimelineMarkerType::DOMEvent) {
-                    _marker = AutoDOMEventMarker::new(self);
-                }
-                let page = get_page(&self.root_page(), pipeline_id);
-                let document = page.document().root();
-                document.r().handle_click_event(self.js_runtime.rt(), button, point);
+                self.handle_mouse_event(pipeline_id, MouseEventType::Click, button, point);
             }
 
-            MouseDownEvent(..) => {}
-            MouseUpEvent(..) => {}
+            MouseDownEvent(button, point) => {
+                self.handle_mouse_event(pipeline_id, MouseEventType::MouseDown, button, point);
+            }
+
+            MouseUpEvent(button, point) => {
+                self.handle_mouse_event(pipeline_id, MouseEventType::MouseUp, button, point);
+            }
+
             MouseMoveEvent(point) => {
                 let _marker;
                 if self.need_emit_timeline_marker(TimelineMarkerType::DOMEvent) {
@@ -1298,6 +1322,16 @@ impl ScriptTask {
                     key, state, modifiers, &mut *self.compositor.borrow_mut());
             }
         }
+    }
+
+    fn handle_mouse_event(&self, pipeline_id: PipelineId, mouse_event_type: MouseEventType, button: MouseButton, point: Point2D<f32>) {
+        let _marker;
+        if self.need_emit_timeline_marker(TimelineMarkerType::DOMEvent) {
+            _marker = AutoDOMEventMarker::new(self);
+        }
+        let page = get_page(&self.root_page(), pipeline_id);
+        let document = page.document().root();
+        document.r().handle_mouse_event(self.js_runtime.rt(), button, point, mouse_event_type);
     }
 
     /// https://html.spec.whatwg.org/multipage/#navigating-across-documents
@@ -1328,7 +1362,7 @@ impl ScriptTask {
         let page = get_page(&self.root_page(), pipeline_id);
         let document = page.document().root();
         match document.r().find_fragment_node(fragment).root() {
-            Some(node) => {
+            Some(ref node) => {
                 self.scroll_fragment_point(pipeline_id, node.r());
             }
             None => {}
@@ -1340,14 +1374,16 @@ impl ScriptTask {
         let page = get_page(&self.root_page(), pipeline_id);
         let window = page.window().root();
         window.r().set_window_size(new_size);
-        self.force_reflow(&*page, ReflowReason::WindowResize);
+        window.r().force_reflow(ReflowGoal::ForDisplay,
+                                ReflowQueryType::NoQuery,
+                                ReflowReason::WindowResize);
 
         let document = page.document().root();
         let fragment_node = window.r().steal_fragment_name()
                                       .and_then(|name| document.r().find_fragment_node(name))
                                       .root();
         match fragment_node {
-            Some(node) => self.scroll_fragment_point(pipeline_id, node.r()),
+            Some(ref node) => self.scroll_fragment_point(pipeline_id, node.r()),
             None => {}
         }
 
@@ -1385,6 +1421,7 @@ impl ScriptTask {
                 preserved_headers: load_data.headers,
                 data: load_data.data,
                 cors: None,
+                pipeline_id: Some(id),
             }, LoadConsumer::Channel(input_chan))).unwrap();
 
             let load_response = input_port.recv().unwrap();
@@ -1413,6 +1450,40 @@ impl ScriptTask {
         self.devtools_markers.borrow_mut().clear();
         *self.devtools_marker_sender.borrow_mut() = None;
     }
+
+    fn handle_parsing_complete(&self, id: PipelineId) {
+        let parent_page = self.root_page();
+        let page = match parent_page.find(id) {
+            Some(page) => page,
+            None => return,
+        };
+
+        let document = page.document().root();
+        let final_url = document.r().url();
+
+        document.r().set_ready_state(DocumentReadyState::Interactive);
+        self.compositor.borrow_mut().set_ready_state(id, PerformingLayout);
+
+        // Kick off the initial reflow of the page.
+        debug!("kicking off initial reflow of {:?}", final_url);
+        document.r().content_changed(NodeCast::from_ref(document.r()),
+                                     NodeDamage::OtherNodeDamage);
+        let window = window_from_node(document.r()).root();
+        window.r().reflow(ReflowGoal::ForDisplay, ReflowQueryType::NoQuery, ReflowReason::FirstLoad);
+
+        // No more reflow required
+        page.set_reflow_status(false);
+
+        // https://html.spec.whatwg.org/multipage/#the-end step 4
+        let addr: Trusted<Document> = Trusted::new(self.get_cx(), document.r(), self.chan.clone());
+        let handler = box DocumentProgressHandler::new(addr, DocumentProgressTask::DOMContentLoaded);
+        self.chan.send(ScriptMsg::RunnableMsg(handler)).unwrap();
+
+        window.r().set_fragment_name(final_url.fragment.clone());
+
+        // Notify devtools that a new script global exists.
+        self.notify_devtools(document.r().Title(), final_url, (id, None));
+    }
 }
 
 impl Drop for ScriptTask {
@@ -1437,7 +1508,6 @@ impl<'a> AutoDOMEventMarker<'a> {
     }
 }
 
-#[unsafe_destructor]
 impl<'a> Drop for AutoDOMEventMarker<'a> {
     fn drop(&mut self) {
         let marker = TimelineMarker::new("DOMEvent".to_owned(), TracingMetadata::IntervalEnd);
@@ -1464,7 +1534,7 @@ fn shut_down_layout(page_tree: &Rc<Page>, exit_type: PipelineExitType) {
     // Drop our references to the JSContext and DOM objects.
     for page in page_tree.iter() {
         let window = page.window().root();
-        window.r().clear_js_context();
+        window.r().clear_js_runtime();
         // Sever the connection between the global and the DOM tree
         page.set_frame(None);
     }

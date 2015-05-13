@@ -14,13 +14,10 @@ path = "../../../components/net"
 [dependencies.net_traits]
 path = "../../../components/net_traits"
 
-[dependencies.profile]
-path = "../../../components/profile"
-
 [dependencies.util]
 path = "../../../components/util"
 
 [dependencies]
 cookie = "*"
-hyper = "*"
+hyper = "0.4"
 url = "*"

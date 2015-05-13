@@ -37,7 +37,7 @@ On Fedora:
 sudo yum install curl freeglut-devel libtool gcc-c++ libXi-devel \
     freetype-devel mesa-libGL-devel glib2-devel libX11-devel libXrandr-devel gperf \
     fontconfig-devel cabextract ttmkfdir python python-virtualenv expat-devel \
-    rpm-build openssl-devel cmake bzip2-devel libXcursor-devel libXmu-devel
+    rpm-build openssl-devel cmake bzip2-devel libXcursor-devel libXmu-devel mesa-libOSMesa-devel
 pushd /tmp
 wget http://corefonts.sourceforge.net/msttcorefonts-2.5-1.spec
 rpmbuild -bb msttcorefonts-2.5-1.spec
@@ -79,6 +79,15 @@ git clone https://github.com/servo/servo
 cd servo
 ./mach build
 ./mach run tests/html/about-mozilla.html
+```
+
+By default, Servo builds in debug mode.  This is useful for development, but
+the resulting binary is very slow.  For benchmarking, performance testing, or
+real-world use, add the `--release` flag to create an optimized build:
+
+``` sh
+./mach build --release
+./mach run --release tests/html/about-mozilla.html
 ```
 
 ### Building for Android target

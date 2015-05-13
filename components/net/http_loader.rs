@@ -4,6 +4,7 @@
 
 use net_traits::{ControlMsg, CookieSource, LoadData, Metadata, LoadConsumer};
 use net_traits::ProgressMsg::{Payload, Done};
+use devtools_traits::{DevtoolsControlMsg, NetworkEvent};
 use mime_classifier::MIMEClassifier;
 use resource_task::{start_sending_opt, start_sending_sniffed_opt};
 
@@ -12,29 +13,30 @@ use std::collections::HashSet;
 use file_loader;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use hyper::client::Request;
-use hyper::header::{AcceptEncoding, ContentLength, ContentType, Host, Location};
-use hyper::HttpError;
+use hyper::header::{AcceptEncoding, Accept, ContentLength, ContentType, Host, Location, qitem, Quality, QualityItem};
+use hyper::Error as HttpError;
 use hyper::method::Method;
 use hyper::mime::{Mime, TopLevel, SubLevel};
 use hyper::net::HttpConnector;
 use hyper::status::{StatusCode, StatusClass};
 use std::error::Error;
-use openssl::ssl::{SslContext, SslVerifyMode};
+use openssl::ssl::{SslContext, SSL_VERIFY_PEER};
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
-use std::thunk::Invoke;
 use util::task::spawn_named;
 use util::resource_files::resources_dir_path;
 use util::opts;
 use url::{Url, UrlParser};
 
+use uuid;
 use std::borrow::ToOwned;
+use std::boxed::FnBox;
 
-pub fn factory(cookies_chan: Sender<ControlMsg>)
-               -> Box<Invoke<(LoadData, LoadConsumer, Arc<MIMEClassifier>)> + Send> {
-    box move |(load_data, senders, classifier)| {
-        spawn_named("http_loader".to_owned(), move || load(load_data, senders, classifier, cookies_chan))
+pub fn factory(cookies_chan: Sender<ControlMsg>, devtools_chan: Option<Sender<DevtoolsControlMsg>>)
+               -> Box<FnBox(LoadData, LoadConsumer, Arc<MIMEClassifier>) + Send> {
+    box move |load_data, senders, classifier| {
+        spawn_named("http_loader".to_owned(), move || load(load_data, senders, classifier, cookies_chan, devtools_chan))
     }
 }
 
@@ -56,7 +58,7 @@ enum ReadResult {
 fn read_block<R: Read>(reader: &mut R) -> Result<ReadResult, ()> {
     let mut buf = vec![0; 1024];
 
-    match reader.read(buf.as_mut_slice()) {
+    match reader.read(&mut buf) {
         Ok(len) if len > 0 => {
             unsafe { buf.set_len(len); }
             Ok(ReadResult::Payload(buf))
@@ -66,7 +68,8 @@ fn read_block<R: Read>(reader: &mut R) -> Result<ReadResult, ()> {
     }
 }
 
-fn load(mut load_data: LoadData, start_chan: LoadConsumer, classifier: Arc<MIMEClassifier>, cookies_chan: Sender<ControlMsg>) {
+fn load(mut load_data: LoadData, start_chan: LoadConsumer, classifier: Arc<MIMEClassifier>,
+        cookies_chan: Sender<ControlMsg>, devtools_chan: Option<Sender<DevtoolsControlMsg>>) {
     // FIXME: At the time of writing this FIXME, servo didn't have any central
     //        location for configuration. If you're reading this and such a
     //        repository DOES exist, please update this constant to use it.
@@ -114,32 +117,33 @@ fn load(mut load_data: LoadData, start_chan: LoadConsumer, classifier: Arc<MIMEC
         info!("requesting {}", url.serialize());
 
         fn verifier(ssl: &mut SslContext) {
-            ssl.set_verify(SslVerifyMode::SslVerifyPeer, None);
+            ssl.set_verify(SSL_VERIFY_PEER, None);
             let mut certs = resources_dir_path();
             certs.push("certs");
-            ssl.set_CA_file(&certs);
+            ssl.set_CA_file(&certs).unwrap();
         };
 
-        let ssl_err_string = "[UnknownError { library: \"SSL routines\", \
+        let ssl_err_string = "Some(OpenSslErrors([UnknownError { library: \"SSL routines\", \
 function: \"SSL3_GET_SERVER_CERTIFICATE\", \
-reason: \"certificate verify failed\" }]";
+reason: \"certificate verify failed\" }]))";
 
         let mut connector = if opts::get().nossl {
             HttpConnector(None)
         } else {
-            HttpConnector(Some(box verifier as Box<FnMut(&mut SslContext)>))
+            HttpConnector(Some(box verifier as Box<FnMut(&mut SslContext) + Send>))
         };
 
         let mut req = match Request::with_connector(load_data.method.clone(), url.clone(), &mut connector) {
             Ok(req) => req,
-            Err(HttpError::HttpIoError(ref io_error)) if (
+            Err(HttpError::Io(ref io_error)) if (
                 io_error.kind() == io::ErrorKind::Other &&
                 io_error.description() == "Error in OpenSSL" &&
-                io_error.detail() == Some(ssl_err_string.to_owned())
+                // FIXME: This incredibly hacky. Make it more robust, and at least test it.
+                format!("{:?}", io_error.cause()) == ssl_err_string
             ) => {
                 let mut image = resources_dir_path();
                 image.push("badcert.html");
-                let load_data = LoadData::new(Url::from_file_path(&*image).unwrap());
+                let load_data = LoadData::new(Url::from_file_path(&*image).unwrap(), None);
                 file_loader::factory(load_data, start_chan, classifier);
                 return;
             },
@@ -166,6 +170,16 @@ reason: \"certificate verify failed\" }]";
         }
 
         req.headers_mut().set(host);
+
+        if !req.headers().has::<Accept>() {
+            let accept = Accept(vec![
+                qitem(Mime(TopLevel::Text, SubLevel::Html, vec![])),
+                qitem(Mime(TopLevel::Application, SubLevel::Ext("xhtml+xml".to_string()), vec![])),
+                QualityItem::new(Mime(TopLevel::Application, SubLevel::Xml, vec![]), Quality(900u16)),
+                QualityItem::new(Mime(TopLevel::Star, SubLevel::Star, vec![]), Quality(800u16)),
+            ]);
+            req.headers_mut().set(accept);
+        }
 
         let (tx, rx) = channel();
         cookies_chan.send(ControlMsg::GetCookiesForUrl(url.clone(), tx, CookieSource::HTTP)).unwrap();
@@ -220,6 +234,18 @@ reason: \"certificate verify failed\" }]";
                 }
             }
         };
+
+        // Send an HttpRequest message to devtools with a unique request_id
+        // TODO: Do this only if load_data has some pipeline_id, and send the pipeline_id in the message
+        let request_id = uuid::Uuid::new_v4().to_simple_string();
+        if let Some(ref chan) = devtools_chan {
+            let net_event = NetworkEvent::HttpRequest(load_data.url.clone(),
+                                                      load_data.method.clone(),
+                                                      load_data.headers.clone(),
+                                                      load_data.data.clone());
+            chan.send(DevtoolsControlMsg::NetworkEventMessage(request_id.clone(), net_event)).unwrap();
+        }
+
         let mut response = match writer.send() {
             Ok(r) => r,
             Err(e) => {
@@ -318,11 +344,26 @@ reason: \"certificate verify failed\" }]";
             }
         }
 
+        // Send an HttpResponse message to devtools with the corresponding request_id
+        // TODO: Send this message only if load_data has a pipeline_id that is not None
+        if let Some(ref chan) = devtools_chan {
+            let net_event_response = NetworkEvent::HttpResponse(metadata.headers.clone(), metadata.status.clone(), None);
+            chan.send(DevtoolsControlMsg::NetworkEventMessage(request_id, net_event_response)).unwrap();
+        }
+
         match encoding_str {
             Some(encoding) => {
                 if encoding == "gzip" {
-                    let mut response_decoding = GzDecoder::new(response).unwrap();
-                    send_data(&mut response_decoding, start_chan, metadata, classifier);
+                    let result = GzDecoder::new(response);
+                    match result {
+                        Ok(mut response_decoding) => {
+                            send_data(&mut response_decoding, start_chan, metadata, classifier);
+                        }
+                        Err(err) => {
+                            send_error(metadata.final_url, err.to_string(), start_chan);
+                            return;
+                        }
+                    }
                 } else if encoding == "deflate" {
                     let mut response_decoding = DeflateDecoder::new(response);
                     send_data(&mut response_decoding, start_chan, metadata, classifier);

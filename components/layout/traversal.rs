@@ -10,10 +10,10 @@ use css::node_style::StyledNode;
 use css::matching::{ApplicableDeclarations, MatchMethods, StyleSharingResult};
 use construct::FlowConstructor;
 use context::LayoutContext;
-use flow::{Flow, MutableFlowUtils};
+use flow::{self, Flow};
 use flow::{PreorderFlowTraversal, PostorderFlowTraversal};
-use flow;
 use incremental::{self, BUBBLE_ISIZES, REFLOW, REFLOW_OUT_OF_FLOW, RestyleDamage};
+use script::layout_interface::ReflowGoal;
 use wrapper::{layout_node_to_unsafe_layout_node, LayoutNode};
 use wrapper::{PostorderNodeMutTraversal, ThreadSafeLayoutNode, UnsafeLayoutNode};
 use wrapper::{PreorderDomTraversal, PostorderDomTraversal};
@@ -119,7 +119,7 @@ fn insert_ancestors_into_bloom_filter(bf: &mut Box<BloomFilter>,
 
 /// The recalc-style-for-node traversal, which styles each node and must run before
 /// layout computation. This computes the styles applied to each node.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct RecalcStyleForNode<'a> {
     pub layout_context: &'a LayoutContext<'a>,
 }
@@ -211,7 +211,7 @@ impl<'a> PreorderDomTraversal for RecalcStyleForNode<'a> {
 }
 
 /// The flow construction traversal, which builds flows for styled nodes.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct ConstructFlows<'a> {
     pub layout_context: &'a LayoutContext<'a>,
 }
@@ -310,7 +310,7 @@ impl<'a> PostorderFlowTraversal for BubbleISizes<'a> {
 }
 
 /// The assign-inline-sizes traversal. In Gecko this corresponds to `Reflow`.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct AssignISizes<'a> {
     pub layout_context: &'a LayoutContext<'a>,
 }
@@ -331,7 +331,7 @@ impl<'a> PreorderFlowTraversal for AssignISizes<'a> {
 /// layout computation. Determines the final block-sizes for all layout objects, computes
 /// positions, and computes overflow regions. In Gecko this corresponds to `Reflow` and
 /// `FinishAndStoreOverflow`.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct AssignBSizesAndStoreOverflow<'a> {
     pub layout_context: &'a LayoutContext<'a>,
 }
@@ -356,7 +356,7 @@ impl<'a> PostorderFlowTraversal for AssignBSizesAndStoreOverflow<'a> {
     }
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct ComputeAbsolutePositions<'a> {
     pub layout_context: &'a LayoutContext<'a>,
 }
@@ -368,7 +368,7 @@ impl<'a> PreorderFlowTraversal for ComputeAbsolutePositions<'a> {
     }
 }
 
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct BuildDisplayList<'a> {
     pub layout_context: &'a LayoutContext<'a>,
 }
@@ -378,5 +378,9 @@ impl<'a> PostorderFlowTraversal for BuildDisplayList<'a> {
     fn process(&self, flow: &mut Flow) {
         flow.build_display_list(self.layout_context);
     }
-}
 
+    #[inline]
+    fn should_process(&self, _: &mut Flow) -> bool {
+        self.layout_context.shared.goal == ReflowGoal::ForDisplay
+    }
+}

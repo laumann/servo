@@ -33,12 +33,22 @@ pub enum ReadyState {
 }
 
 /// A newtype struct for denoting the age of messages; prevents race conditions.
-#[derive(PartialEq, Eq, Debug, Copy)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub struct Epoch(pub u32);
 
 impl Epoch {
     pub fn next(&mut self) {
         let Epoch(ref mut u) = *self;
+        *u += 1;
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
+pub struct FrameTreeId(pub u32);
+
+impl FrameTreeId {
+    pub fn next(&mut self) {
+        let FrameTreeId(ref mut u) = *self;
         *u += 1;
     }
 }
@@ -71,7 +81,7 @@ pub enum ScrollPolicy {
 
 /// All layer-specific information that the painting task sends to the compositor other than the
 /// buffer contents of the layer itself.
-#[derive(Copy)]
+#[derive(Copy, Clone)]
 pub struct LayerMetadata {
     /// An opaque ID. This is usually the address of the flow and index of the box within it.
     pub id: LayerId,
@@ -99,7 +109,8 @@ pub trait PaintListener {
     fn assign_painted_buffers(&mut self,
                               pipeline_id: PipelineId,
                               epoch: Epoch,
-                              replies: Vec<(LayerId, Box<LayerBufferSet>)>);
+                              replies: Vec<(LayerId, Box<LayerBufferSet>)>,
+                              frame_tree_id: FrameTreeId);
 
     fn paint_msg_discarded(&mut self);
     fn set_paint_state(&mut self, PipelineId, PaintState);

@@ -13,7 +13,8 @@ use dom::bindings::codegen::InheritTypes::{ElementCast, EventTargetCast, HTMLEle
 use dom::bindings::codegen::InheritTypes::{HTMLTextAreaElementDerived, HTMLFieldSetElementDerived};
 use dom::bindings::codegen::InheritTypes::{KeyboardEventCast, TextDerived};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JSRef, LayoutJS, Temporary, OptionalRootable};
+use dom::bindings::js::{JSRef, LayoutJS, OptionalRootable, Rootable};
+use dom::bindings::js::Temporary;
 use dom::bindings::refcounted::Trusted;
 use dom::document::{Document, DocumentHelpers};
 use dom::element::{Element, AttributeHandlers};
@@ -29,6 +30,7 @@ use textinput::{TextInput, Lines, KeyReaction};
 use dom::virtualmethods::VirtualMethods;
 use dom::window::WindowHelpers;
 use script_task::{ScriptMsg, Runnable};
+use msg::constellation_msg::ConstellationChan;
 
 use util::str::DOMString;
 use string_cache::Atom;
@@ -39,7 +41,7 @@ use std::cell::Cell;
 #[dom_struct]
 pub struct HTMLTextAreaElement {
     htmlelement: HTMLElement,
-    textinput: DOMRefCell<TextInput>,
+    textinput: DOMRefCell<TextInput<ConstellationChan>>,
     cols: Cell<u32>,
     rows: Cell<u32>,
     // https://html.spec.whatwg.org/multipage/#concept-textarea-dirty
@@ -94,7 +96,7 @@ impl HTMLTextAreaElement {
         let chan = document.window().root().r().constellation_chan();
         HTMLTextAreaElement {
             htmlelement: HTMLElement::new_inherited(HTMLElementTypeId::HTMLTextAreaElement, localName, prefix, document),
-            textinput: DOMRefCell::new(TextInput::new(Lines::Multiple, "".to_owned(), Some(chan))),
+            textinput: DOMRefCell::new(TextInput::new(Lines::Multiple, "".to_owned(), chan)),
             cols: Cell::new(DEFAULT_COLS),
             rows: Cell::new(DEFAULT_ROWS),
             value_changed: Cell::new(false),
@@ -113,10 +115,8 @@ impl<'a> HTMLTextAreaElementMethods for JSRef<'a, HTMLTextAreaElement> {
     // constraints
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea-cols
-    make_uint_getter!(Cols);
-
-    // https://html.spec.whatwg.org/multipage/#dom-textarea-cols
-    make_uint_setter!(SetCols, "cols");
+    make_uint_getter!(Cols, "cols", DEFAULT_COLS);
+    make_limited_uint_setter!(SetCols, "cols", DEFAULT_COLS);
 
     // https://www.whatwg.org/html/#dom-fe-disabled
     make_bool_getter!(Disabled);
@@ -149,10 +149,8 @@ impl<'a> HTMLTextAreaElementMethods for JSRef<'a, HTMLTextAreaElement> {
     make_bool_setter!(SetRequired, "required");
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea-rows
-    make_uint_getter!(Rows);
-
-    // https://html.spec.whatwg.org/multipage/#dom-textarea-rows
-    make_uint_setter!(SetRows, "rows");
+    make_uint_getter!(Rows, "rows", DEFAULT_ROWS);
+    make_limited_uint_setter!(SetRows, "rows", DEFAULT_ROWS);
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea-wrap
     make_getter!(Wrap);
@@ -309,8 +307,8 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLTextAreaElement> {
 
     fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
         match name {
-            &atom!("cols") => AttrValue::from_u32(value, DEFAULT_COLS),
-            &atom!("rows") => AttrValue::from_u32(value, DEFAULT_ROWS),
+            &atom!("cols") => AttrValue::from_limited_u32(value, DEFAULT_COLS),
+            &atom!("rows") => AttrValue::from_limited_u32(value, DEFAULT_ROWS),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
@@ -344,12 +342,12 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLTextAreaElement> {
             s.handle_event(event);
         }
 
-        if "click" == event.Type().as_slice() && !event.DefaultPrevented() {
+        if &*event.Type() == "click" && !event.DefaultPrevented() {
             //TODO: set the editing position for text inputs
 
             let doc = document_from_node(*self).root();
             doc.r().request_focus(ElementCast::from_ref(*self));
-        } else if "keydown" == event.Type().as_slice() && !event.DefaultPrevented() {
+        } else if &*event.Type() == "keydown" && !event.DefaultPrevented() {
             let keyevent: Option<JSRef<KeyboardEvent>> = KeyboardEventCast::to_ref(event);
             keyevent.map(|kevent| {
                 match self.textinput.borrow_mut().handle_keydown(kevent) {

@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use dom::attr::{Attr, AttrHelpers};
+use dom::attr::{Attr, AttrHelpers, AttrValue};
 use dom::bindings::codegen::Bindings::HTMLTableElementBinding::HTMLTableElementMethods;
 use dom::bindings::codegen::Bindings::HTMLTableElementBinding;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::InheritTypes::{HTMLElementCast, HTMLTableCaptionElementCast};
 use dom::bindings::codegen::InheritTypes::{HTMLTableElementDerived, NodeCast};
-use dom::bindings::js::{JSRef, Temporary};
+use dom::bindings::js::{JSRef, Rootable, Temporary};
 use dom::document::Document;
 use dom::eventtarget::{EventTarget, EventTargetTypeId};
 use dom::element::ElementTypeId;
@@ -17,8 +17,11 @@ use dom::htmltablecaptionelement::HTMLTableCaptionElement;
 use dom::node::{Node, NodeHelpers, NodeTypeId};
 use dom::virtualmethods::VirtualMethods;
 
-use cssparser::RGBA;
 use util::str::{self, DOMString, LengthOrPercentageOrAuto};
+
+use cssparser::RGBA;
+use string_cache::Atom;
+
 use std::cell::Cell;
 
 #[dom_struct]
@@ -130,18 +133,17 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLTableElement> {
 
         match attr.local_name() {
             &atom!("bgcolor") => {
-                self.background_color.set(str::parse_legacy_color(attr.value().as_slice()).ok())
+                self.background_color.set(str::parse_legacy_color(&attr.value()).ok())
             }
             &atom!("border") => {
                 // According to HTML5 § 14.3.9, invalid values map to 1px.
                 self.border.set(Some(str::parse_unsigned_integer(attr.value()
-                                                                     .as_slice()
                                                                      .chars()).unwrap_or(1)))
             }
             &atom!("cellspacing") => {
-                self.cellspacing.set(str::parse_unsigned_integer(attr.value().as_slice().chars()))
+                self.cellspacing.set(str::parse_unsigned_integer(attr.value().chars()))
             }
-            &atom!("width") => self.width.set(str::parse_length(attr.value().as_slice())),
+            &atom!("width") => self.width.set(str::parse_length(&attr.value())),
             _ => ()
         }
     }
@@ -157,6 +159,13 @@ impl<'a> VirtualMethods for JSRef<'a, HTMLTableElement> {
             &atom!("cellspacing") => self.cellspacing.set(None),
             &atom!("width") => self.width.set(LengthOrPercentageOrAuto::Auto),
             _ => ()
+        }
+    }
+
+    fn parse_plain_attribute(&self, local_name: &Atom, value: DOMString) -> AttrValue {
+        match local_name {
+            &atom!("border") => AttrValue::from_u32(value, 1),
+            _ => self.super_type().unwrap().parse_plain_attribute(local_name, value),
         }
     }
 }

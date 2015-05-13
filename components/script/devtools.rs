@@ -5,7 +5,7 @@
 use devtools_traits::{EvaluateJSReply, NodeInfo, Modification, TimelineMarker, TimelineMarkerType};
 use dom::bindings::conversions::FromJSValConvertible;
 use dom::bindings::conversions::StringificationBehavior;
-use dom::bindings::js::{JSRef, Temporary, OptionalRootable};
+use dom::bindings::js::{JSRef, OptionalRootable, Rootable, Temporary};
 use dom::bindings::codegen::InheritTypes::{NodeCast, ElementCast};
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use dom::bindings::codegen::Bindings::DOMRectBinding::{DOMRectMethods};
@@ -14,7 +14,7 @@ use dom::node::{Node, NodeHelpers};
 use dom::window::{WindowHelpers, ScriptHelpers};
 use dom::element::Element;
 use dom::document::DocumentHelpers;
-use page::Page;
+use page::{IterablePage, Page};
 use msg::constellation_msg::PipelineId;
 use script_task::{get_page, ScriptTask};
 
@@ -146,4 +146,10 @@ pub fn handle_drop_timeline_markers(page: &Rc<Page>,
             }
         }
     }
+}
+
+pub fn handle_request_animation_frame(page: &Rc<Page>, id: PipelineId, callback: Box<Fn(f64, )>) {
+    let page = page.find(id).expect("There is no such page");
+    let doc = page.document().root();
+    doc.r().request_animation_frame(callback);
 }

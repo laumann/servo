@@ -360,22 +360,22 @@ impl Pipeline {
     pub fn to_sendable(&self) -> Option<CompositionPipeline> {
         if self.shared_with_compositor.get() {
             debug!("{:?} has already been shared with the compositor!", self.id);
-            None
-        } else {
-            self.shared_with_compositor.set(true);
-            let (for_compositor, for_paint_task) = session_channel();
-
-            debug!("{:?} sending channel to paint task", self.id);
-            self.with_paint_chan(|paint_chan| {
-                paint_chan.skip2().sel1().send(for_paint_task).zero()
-            });
-
-            Some(CompositionPipeline {
-                id: self.id.clone(),
-                script_chan: self.script_chan.clone(),
-                paint_chan: RefCell::new(Some(for_compositor.enter())),
-            })
+            return None;
         }
+
+        self.shared_with_compositor.set(true);
+        let (for_compositor, for_paint_task) = session_channel();
+
+        debug!("{:?} sending compositor session channel to paint task", self.id);
+        self.with_paint_chan(|paint_chan| {
+            paint_chan.skip2().sel1().send(for_paint_task).zero()
+        });
+
+        Some(CompositionPipeline {
+            id: self.id.clone(),
+            script_chan: self.script_chan.clone(),
+            paint_chan: RefCell::new(Some(for_compositor.enter())),
+        })
     }
 
     pub fn add_child(&mut self, frame_id: FrameId) {

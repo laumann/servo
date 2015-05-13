@@ -21,7 +21,6 @@ use msg::compositor_msg::{Epoch, LayerId, LayerMetadata, FrameTreeId, ReadyState
 use msg::compositor_msg::{PaintListener, PaintState, ScriptListener, ScrollPolicy};
 use msg::constellation_msg::{AnimationState, ConstellationChan, PipelineId};
 use msg::constellation_msg::{Key, KeyState, KeyModifiers};
-use pipeline::CompositionPipeline;
 use profile_traits::mem;
 use profile_traits::time;
 use png;

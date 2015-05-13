@@ -597,15 +597,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         if let Some(ref layer) = self.scene.root {
             layer.clear_all_tiles(self);
         }
-        let root_pipeline_id = frame_tree.pipeline_id;
         self.scene.root = Some(self.create_frame_tree_root_layers(&mut frame_tree, None));
 
         // Assign root_pipeline
-        let root_pipeline = match self.get_or_create_pipeline_details(root_pipeline_id).pipeline {
+        self.root_pipeline = match self.get_or_create_pipeline_details(frame_tree.pipeline_id).pipeline {
             Some(ref pipeline) => Some(pipeline.clone()),
-            None => panic!("{:?} has not been sent", root_pipeline_id)
+            None => panic!("{:?} has not been sent", frame_tree.pipeline_id)
         };
-        self.root_pipeline = root_pipeline;
 
         self.scene.set_root_layer_size(self.window_size.as_f32());
 

@@ -180,6 +180,7 @@ impl<'a> Iterator for FrameTreeIterator<'a> {
 
 pub struct SendableFrameTree {
     pub pipeline_id: PipelineId,
+    pub pipeline: Option<CompositionPipeline>,
     pub rect: Option<TypedRect<PagePx, f32>>,
     pub children: Vec<SendableFrameTree>,
 }
@@ -977,15 +978,16 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
 
     // Convert a frame to a sendable form to pass to the compositor
     fn frame_to_sendable(&self, frame_id: FrameId) -> SendableFrameTree {
-        let pipeline_id = self.frame(frame_id).current;
+        let pipeline = self.pipeline(self.frame(frame_id).current);
 
         let mut frame_tree = SendableFrameTree {
-            pipeline_id: pipeline_id,
-            rect: self.pipeline(pipeline_id).rect,
+            pipeline_id: pipeline.id,
+            pipeline: pipeline.to_sendable(),
+            rect: pipeline.rect,
             children: vec!(),
         };
 
-        let pipeline = self.pipeline(pipeline_id);
+        //let pipeline = self.pipeline(pipeline_id);
         for child_frame_id in &pipeline.children {
             frame_tree.children.push(self.frame_to_sendable(*child_frame_id));
         }
@@ -1007,17 +1009,9 @@ impl<LTF: LayoutTaskFactory, STF: ScriptTaskFactory> Constellation<LTF, STF> {
         if let Some(root_frame_id) = self.root_frame_id {
             let frame_tree = self.frame_to_sendable(root_frame_id);
 
-
-            let sendable_pipeline = {
-                let current_frame = self.frame(root_frame_id).current;
-                let pipeline = self.mut_pipeline(current_frame);
-                pipeline.to_sendable()
-            };
-
             let (chan, port) = channel();
             self.compositor_proxy.send(CompositorMsg::SetFrameTree(
                 frame_tree,
-                sendable_pipeline,
                 chan,
                 self.chan.clone()));
 

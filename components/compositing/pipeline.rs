@@ -27,7 +27,7 @@ use url::Url;
 use util::geometry::{PagePx, ViewportPx};
 use util::opts;
 use session_types::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::marker;
 use gfx::paint_task::PaintRequest;
 use gfx::paint_task::CompositorToPaint as CompositorToPaintDual;
@@ -65,7 +65,7 @@ pub struct Pipeline {
     /// animations cause composites to be continually scheduled.
     pub running_animations: bool,
     pub children: Vec<FrameId>,
-    pub shared_with_compositor: bool,
+    pub shared_with_compositor: Cell<bool>,
 }
 
 /// The subset of the pipeline that is needed for layer composition.
@@ -261,7 +261,7 @@ impl Pipeline {
             children: vec!(),
             rect: rect,
             running_animations: false,
-            shared_with_compositor: false
+            shared_with_compositor: Cell::new(false)
         }
     }
 
@@ -357,12 +357,12 @@ impl Pipeline {
             LayoutControlMsg::ExitNow(PipelineExitType::PipelineOnly)).unwrap();
     }
 
-    pub fn to_sendable(&mut self) -> Option<CompositionPipeline> {
-        if self.shared_with_compositor {
+    pub fn to_sendable(&self) -> Option<CompositionPipeline> {
+        if self.shared_with_compositor.get() {
             debug!("{:?} has already been shared with the compositor!", self.id);
             None
         } else {
-            self.shared_with_compositor = true;
+            self.shared_with_compositor.set(true);
             let (for_compositor, for_paint_task) = session_channel();
 
             debug!("{:?} sending channel to paint task", self.id);

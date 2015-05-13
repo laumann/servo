@@ -84,7 +84,7 @@ impl CompositorEventListener for NullCompositor {
                 chan.send(None).unwrap();
             }
 
-            Msg::SetFrameTree(_, _, response_chan, _) => {
+            Msg::SetFrameTree(_, response_chan, _) => {
                 response_chan.send(()).unwrap();
             }
 

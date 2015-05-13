@@ -346,9 +346,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.remove_outstanding_paint_msg();
             }
 
-            (Msg::SetFrameTree(frame_tree, pipeline, response_chan, new_constellation_chan),
+            (Msg::SetFrameTree(frame_tree, response_chan, new_constellation_chan),
              ShutdownState::NotShuttingDown) => {
-                self.set_frame_tree(frame_tree, pipeline, response_chan, new_constellation_chan);
+                self.set_frame_tree(frame_tree, response_chan, new_constellation_chan);
                 self.send_viewport_rects_for_all_layers();
                 self.get_title_for_main_frame();
             }
@@ -588,29 +588,25 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 
     fn set_frame_tree(&mut self,
-                      frame_tree: SendableFrameTree,
-                      pipeline: Option<CompositionPipeline>,
+                      mut frame_tree: SendableFrameTree,
                       response_chan: Sender<()>,
                       new_constellation_chan: ConstellationChan) {
         response_chan.send(()).unwrap();
-
-        let pipeline_rc = if let Some(pipeline) = pipeline {
-            Rc::new(pipeline)
-        } else {
-            // Dig out the CompositionPipeline we already have in storage
-            let details = self.get_or_create_pipeline_details(frame_tree.pipeline_id);
-            match details.pipeline {
-                Some(ref pipeline) => pipeline.clone(),
-                None => panic!("{:?} has not been sent", frame_tree.pipeline_id)
-            }
-        };
-        self.root_pipeline = Some(pipeline_rc.clone());
 
         // If we have an old root layer, release all old tiles before replacing it.
         if let Some(ref layer) = self.scene.root {
             layer.clear_all_tiles(self);
         }
-        self.scene.root = Some(self.create_frame_tree_root_layers(&frame_tree, pipeline_rc, None));
+        let root_pipeline_id = frame_tree.pipeline_id;
+        self.scene.root = Some(self.create_frame_tree_root_layers(&mut frame_tree, None));
+
+        // Assign root_pipeline
+        let root_pipeline = match self.get_or_create_pipeline_details(root_pipeline_id).pipeline {
+            Some(ref pipeline) => Some(pipeline.clone()),
+            None => panic!("{:?} has not been sent", root_pipeline_id)
+        };
+        self.root_pipeline = root_pipeline;
+
         self.scene.set_root_layer_size(self.window_size.as_f32());
 
         // Initialize the new constellation channel by sending it the root window size.
@@ -623,7 +619,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
     fn create_root_layer_for_pipeline_and_rect(&mut self,
                                                pipeline_id: PipelineId,
-                                               pipeline: Rc<CompositionPipeline>,
+                                               pipeline: Option<CompositionPipeline>,
                                                frame_rect: Option<TypedRect<PagePx, f32>>)
                                                -> Rc<Layer<CompositorData>>
     {
@@ -640,7 +636,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                                                    WantsScrollEventsFlag::WantsScrollEvents,
                                                    opts::get().tile_size);
 
-        self.get_or_create_pipeline_details(pipeline_id).pipeline = Some(pipeline);
+        if let Some(pipeline) = pipeline {
+            self.get_or_create_pipeline_details(pipeline_id).pipeline = Some(Rc::new(pipeline));
+        }
 
         // All root layers mask to bounds.
         *root_layer.masks_to_bounds.borrow_mut() = true;
@@ -654,15 +652,15 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 
     fn create_frame_tree_root_layers(&mut self,
-                                     frame_tree: &SendableFrameTree,
-                                     pipeline: Rc<CompositionPipeline>,
+                                     frame_tree: &mut SendableFrameTree,
                                      frame_rect: Option<TypedRect<PagePx, f32>>)
                                      -> Rc<Layer<CompositorData>> {
         let root_layer = self.create_root_layer_for_pipeline_and_rect(frame_tree.pipeline_id,
-                                                                      pipeline.clone(),
+                                                                      frame_tree.pipeline.take(),
                                                                       frame_rect);
-        for kid in frame_tree.children.iter() {
-            root_layer.add_child(self.create_frame_tree_root_layers(kid, pipeline.clone(), kid.rect));
+        for kid in frame_tree.children.iter_mut() {
+            let rect = kid.rect;
+            root_layer.add_child(self.create_frame_tree_root_layers(kid, rect));
         }
         root_layer
     }
@@ -919,9 +917,10 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                             // CompositionPipelines may be aliased
                             // (because of iframes), so we make sure
                             // to only call close() once.
-                            if pipeline_id == pipeline.id {
-                                pipeline.close();
+                            if pipeline_id != pipeline.id {
+                                panic!("{:?} != {:?}", pipeline_id, pipeline.id);
                             }
+                            pipeline.close();
                         }
                     }
                     self.shutdown_state = ShutdownState::ShuttingDown;

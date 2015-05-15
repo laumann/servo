@@ -226,21 +226,16 @@ impl<C> PaintTask<C> where C: PaintListener + marker::Send + 'static {
 
         while pipeline_chan.is_some() || layout_chan.is_some() || compositor_chan.is_some() {
             let chan_to_read = {
-                let mut s = Vec::with_capacity(3);
                 let mut sel = ChanSelect::new();
                 if let Some(ref pipeline_chan) = pipeline_chan {
-                    s.push("pipeline");
                     sel.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
                 }
                 if let Some(ref layout_chan) = layout_chan {
-                    s.push("layout_chan");
                     sel.add_offer_ret(&layout_chan, ChanToRead::Layout);
                 }
                 if let Some(ref compositor_chan) = compositor_chan {
-                    s.push("compositor");
                     sel.add_offer_ret(&compositor_chan, ChanToRead::Compositor);
                 }
-                debug!("PaintTask for {:?} waiting for: {:?}", self.id, s);
                 sel.wait()
             };
             match chan_to_read {

@@ -34,7 +34,7 @@ use msg::constellation_msg::{Key, KeyModifiers, KeyState, LoadData};
 use msg::constellation_msg::{PipelineId, WindowSizeData};
 use png;
 use profile_traits::mem;
-use profile_traits::time::{self, ProfilerCategory, profile};
+use profile_traits::time::{self, ProfilerCategory, profile, ProfilerMsg};
 use script_traits::{ConstellationControlMsg, ScriptControlChan};
 use std::cmp;
 use std::collections::HashMap;
@@ -401,6 +401,15 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 //
                 // TODO(pcwalton): Specify which frame's load completed.
                 self.window.load_end();
+
+                // Exit if -x/--exit flag is present.
+                if opts::get().exit_after_load {
+                    debug!("shutting down the constellation after load complete");
+                    self.time_profiler_chan.send(ProfilerMsg::Print);
+                    let ConstellationChan(ref chan) = self.constellation_chan;
+                    chan.send(ConstellationMsg::Exit).unwrap();
+                    self.shutdown_state = ShutdownState::ShuttingDown;
+                }
             }
 
             (Msg::ScrollTimeout(timestamp), ShutdownState::NotShuttingDown) => {

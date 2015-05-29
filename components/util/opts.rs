@@ -142,6 +142,9 @@ pub struct Opts {
 
     /// Whether Style Sharing Cache is used
     pub disable_share_style_cache: bool,
+
+    /// Exit after page load
+    pub exit_after_load: bool,
 }
 
 fn print_usage(app: &str, opts: &[getopts::OptGroup]) {
@@ -228,6 +231,7 @@ pub fn default_opts() -> Opts {
         resources_path: None,
         sniff_mime_types: false,
         disable_share_style_cache: false,
+        exit_after_load: false,
     }
 }
 
@@ -397,6 +401,7 @@ pub fn from_cmdline_args(args: &[String]) -> bool {
         resources_path: opt_match.opt_str("resources-path"),
         sniff_mime_types: opt_match.opt_present("sniff-mime-types"),
         disable_share_style_cache: debug_options.contains(&"disable-share-style-cache"),
+        exit_after_load: opt_match.opt_present("exit"),
     };
 
     set(opts);

@@ -68,6 +68,7 @@ fn main() {
 
         // Feed events from the window to the browser until the browser
         // says to stop.
+        let start = time::precise_time_ns();
         loop {
             let should_continue = match window {
                 None => browser.browser.handle_event(WindowEvent::Idle),
@@ -80,6 +81,8 @@ fn main() {
                 break
             }
         };
+        let end = time::precise_time_ns();
+        println!("Elapsed: {}", end - start);
 
         maybe_unregister_glutin_resize_handler(&window);
 

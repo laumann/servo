@@ -94,6 +94,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::result::Result;
 use std::sync::mpsc::{channel, Sender, Receiver, Select};
+use std::thread;
 use time::Tm;
 
 use hyper::header::{ContentType, HttpDate};
@@ -570,11 +571,19 @@ impl ScriptTask {
             FromScript(ScriptMsg),
             FromDevtools(DevtoolScriptControlMsg),
             FromImageCache(ImageCacheResult),
+            FromTimer
         }
 
         // Store new resizes, and gather all other events.
         let mut sequential = vec!();
 
+
+        debug!("Waiting on messages");
+        let (timer_tx, timer_rx) = channel();
+        spawn_named("Timer".to_owned(), move|| {
+            thread::sleep_ms(3000);
+            let _ = timer_tx.send(()); // We don't care if it picked up or not
+        });
         // Receive at least one message so we don't spinloop.
         let mut event = {
             let sel = Select::new();
@@ -582,6 +591,7 @@ impl ScriptTask {
             let mut port2 = sel.handle(&self.control_port);
             let mut port3 = sel.handle(&self.devtools_port);
             let mut port4 = sel.handle(&self.image_cache_port);
+            let mut port5 = sel.handle(&timer_rx);
             unsafe {
                 port1.add();
                 port2.add();
@@ -589,6 +599,7 @@ impl ScriptTask {
                     port3.add();
                 }
                 port4.add();
+                port5.add();
             }
             let ret = sel.wait();
             if ret == port1.id() {
@@ -599,6 +610,9 @@ impl ScriptTask {
                 MixedMessage::FromDevtools(self.devtools_port.recv().unwrap())
             } else if ret == port4.id() {
                 MixedMessage::FromImageCache(self.image_cache_port.recv().unwrap())
+            }  else if ret == port5.id() {
+                timer_rx.recv().unwrap();
+                MixedMessage::FromTimer
             } else {
                 panic!("unexpected select result")
             }
@@ -669,6 +683,10 @@ impl ScriptTask {
                 MixedMessage::FromScript(inner_msg) => self.handle_msg_from_script(inner_msg),
                 MixedMessage::FromDevtools(inner_msg) => self.handle_msg_from_devtools(inner_msg),
                 MixedMessage::FromImageCache(inner_msg) => self.handle_msg_from_image_cache(inner_msg),
+                MixedMessage::FromTimer => {
+                    debug!("Quitting due to inactivity");
+                    self.compositor.borrow_mut().close();
+                }
             }
         }
 

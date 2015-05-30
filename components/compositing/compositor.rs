@@ -33,7 +33,7 @@ use msg::constellation_msg::{Key, KeyModifiers, KeyState, LoadData};
 use msg::constellation_msg::{PipelineId, WindowSizeData};
 use png;
 use profile_traits::mem;
-use profile_traits::time::{self, ProfilerCategory, profile};
+use profile_traits::time::{self, ProfilerCategory, profile, ProfilerMsg};
 use script_traits::{ConstellationControlMsg, ScriptControlChan};
 use std::cmp;
 use std::collections::HashMap;

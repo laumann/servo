@@ -401,15 +401,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 //
                 // TODO(pcwalton): Specify which frame's load completed.
                 self.window.load_end();
-
-                // Exit if -x/--exit flag is present.
-                if opts::get().exit_after_load {
-                    debug!("shutting down the constellation after load complete");
-                    self.time_profiler_chan.send(ProfilerMsg::Print);
-                    let ConstellationChan(ref chan) = self.constellation_chan;
-                    chan.send(ConstellationMsg::Exit).unwrap();
-                    self.shutdown_state = ShutdownState::ShuttingDown;
-                }
             }
 
             (Msg::ScrollTimeout(timestamp), ShutdownState::NotShuttingDown) => {

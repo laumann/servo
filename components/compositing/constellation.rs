@@ -260,7 +260,8 @@ impl<'a> Iterator for FrameTreeIterator<'a> {
 }
 
 pub struct SendableFrameTree {
-    pub pipeline: CompositionPipeline,
+    pub pipeline_id: PipelineId,
+    pub pipeline: Option<CompositionPipeline>,
     pub size: Option<TypedSize2D<PagePx, f32>>,
     pub children: Vec<SendableFrameTree>,
 }
@@ -1555,7 +1556,8 @@ impl<LTF: LayoutThreadFactory, STF: ScriptThreadFactory> Constellation<LTF, STF>
         let pipeline = self.pipeline(self.frame(frame_id).current);
 
         let mut frame_tree = SendableFrameTree {
-            pipeline: pipeline.to_sendable(),
+            pipeline_id: pipeline.id,
+            pipeline: Some(pipeline.to_sendable()),
             size: pipeline.size,
             children: vec!(),
         };

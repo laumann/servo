@@ -76,6 +76,7 @@ extern crate url;
 #[macro_use]
 extern crate util;
 
+extern crate session_types;
 
 pub use paint_context::PaintContext;
 

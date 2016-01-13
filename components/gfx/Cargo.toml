@@ -67,6 +67,10 @@ path = "../script_traits"
 [dependencies.ipc-channel]
 git = "https://github.com/servo/ipc-channel"
 
+[dependencies.session_types]
+git = "https://github.com/Munksgaard/session-types"
+features = [ "chan_select" ]
+
 [target.x86_64-apple-darwin.dependencies]
 core-foundation = "0.2"
 core-graphics = "0.2"

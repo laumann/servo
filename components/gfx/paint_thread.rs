@@ -37,6 +37,8 @@ use util::geometry::{ExpandToPixelBoundaries};
 use util::opts;
 use util::thread;
 use util::thread_state;
+use session_types::*;
+use std::marker;
 
 #[derive(Clone, Deserialize, Serialize, HeapSizeOf)]
 pub enum PaintLayerContents {
@@ -191,12 +193,24 @@ pub enum Msg {
     FromChrome(ChromeToPaintMsg),
 }
 
+type LayoutToPaint = Offer<PaintInit, Offer<CanvasLayer, ExitLayout>>;
+type PaintInit = Recv<(Epoch, PaintLayer), Var<Z>>;
+type CanvasLayer = Recv<(LayerId, IpcSender<CanvasMsg>), Var<Z>>;
+type ExitLayout = Eps; // TODO(tj): This probably needs to change
+
 #[derive(Deserialize, Serialize)]
 pub enum LayoutToPaintMsg {
     PaintInit(Epoch, PaintLayer),
     CanvasLayer(LayerId, IpcSender<CanvasMsg>),
     Exit(IpcSender<()>),
 }
+
+type ChromeToPaint = Offer<Paint, Offer<PaintPermissionGranted, Offer<PaintPermissionRevoked, Offer<CollectReports, ExitChrome>>>>;
+type Paint = Recv<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
+type PaintPermissionGranted = Var<Z>;
+type PaintPermissionRevoked = Var<Z>;
+type CollectReports = Recv<ReportsChan, Var<Z>>;
+type ExitChrome = Eps; // TODO(tj): This probably needs to change
 
 pub enum ChromeToPaintMsg {
     Paint(Vec<PaintRequest>, FrameTreeId),
@@ -240,7 +254,7 @@ macro_rules! native_display(
     )
 );
 
-impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
+impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
     pub fn create(id: PipelineId,
                   url: Url,
                   chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
@@ -296,6 +310,41 @@ impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
             shutdown_chan.send(()).unwrap();
         }, ConstellationMsg::Failure(failure_msg), c);
     }
+
+    fn start2(&mut self,
+              chrome_chan: Chan<(), Rec<ChromeToPaint>>,
+              layout_chan: Chan<(), Rec<LayoutToPaint>>) {
+        debug!("");
+
+        let mut chrome_chan = Some(chrome_chan.enter());
+        let mut layout_chan = Some(layout_chan.enter());
+
+        enum ChanToRead { Chrome, Layout }
+
+        while chrome_chan.is_some() || layout_chan.is_some() {
+            // LayoutToPaint chan
+            let chan_to_read = {
+                let mut sel = ChanSelect::new();
+                if let Some(ref chrome_chan) = chrome_chan {
+                    sel.add_offer_ret(&chrome_chan, ChanToRead::Chrome);
+                }
+                if let Some(ref layout_chan) = layout_chan {
+                    sel.add_offer_ret(&layout_chan, ChanToRead::Layout);
+                }
+                sel.wait()
+            };
+            match chan_to_read {
+                ChanToRead::Chrome => {
+                    //self.handle_chrome(&mut chrome_chan);
+                }
+                ChanToRead::Layout => {
+
+                }
+            }
+        }
+    }
+
+
 
     fn start(&mut self) {
         debug!("PaintThread: beginning painting loop");

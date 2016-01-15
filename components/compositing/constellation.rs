@@ -1557,7 +1557,7 @@ impl<LTF: LayoutThreadFactory, STF: ScriptThreadFactory> Constellation<LTF, STF>
 
         let mut frame_tree = SendableFrameTree {
             pipeline_id: pipeline.id,
-            pipeline: Some(pipeline.to_sendable()),
+            pipeline: pipeline.to_sendable(),
             size: pipeline.size,
             children: vec!(),
         };

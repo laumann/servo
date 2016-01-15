@@ -49,6 +49,8 @@ extern crate time;
 extern crate url;
 #[macro_use]
 extern crate util;
+#[macro_use]
+extern crate session_types;
 
 pub use compositor_thread::{CompositorEventListener, CompositorProxy, CompositorThread};
 pub use constellation::Constellation;

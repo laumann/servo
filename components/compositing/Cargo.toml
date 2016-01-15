@@ -66,6 +66,10 @@ git = "https://github.com/ecoal95/rust-offscreen-rendering-context"
 [dependencies.gaol]
 git = "https://github.com/pcwalton/gaol"
 
+[dependencies.session_types]
+git = "https://github.com/Munksgaard/session-types"
+features = [ "chan_select" ]
+
 [dependencies]
 app_units = {version = "0.1", features = ["plugins"]}
 image = "0.5.0"

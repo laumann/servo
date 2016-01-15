@@ -9,7 +9,7 @@ use devtools_traits::{DevtoolsControlMsg, ScriptToDevtoolsControlMsg};
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
 use gfx::font_cache_thread::FontCacheThread;
-use gfx::paint_thread::{ChromeToPaintMsg, LayoutToPaintMsg, PaintThread};
+use gfx::paint_thread::{ChromeToPaintMsg, LayoutToPaintMsg, PaintThread, PaintRequest};
 use gfx_traits::PaintMsg;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
@@ -18,6 +18,7 @@ use layout_traits::{LayoutControlChan, LayoutThreadFactory};
 use msg::constellation_msg::{ConstellationChan, Failure, FrameId, PipelineId, SubpageId};
 use msg::constellation_msg::{LoadData, MozBrowserEvent, WindowSizeData};
 use msg::constellation_msg::{PipelineNamespaceId};
+use msg::compositor_msg::FrameTreeId;
 use net_traits::ResourceThread;
 use net_traits::image_cache_thread::ImageCacheThread;
 use net_traits::storage_thread::StorageThread;
@@ -29,12 +30,35 @@ use script_traits::{ScriptToCompositorMsg, ScriptThreadFactory, TimerEventReques
 use std::mem;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
+use std::cell::{Cell, RefCell};
+use std::marker;
 use url::Url;
 use util;
 use util::geometry::{PagePx, ViewportPx};
 use util::ipc::OptionalIpcSender;
 use util::opts::{self, Opts};
 use util::prefs;
+
+use session_types::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel};
+
+// type PaintPermissionGranted = Var<Z>;
+// type PaintPermissionRevoked = Var<Z>;
+// type PassCompositor         = Send<Chan<(), Rec<CompositorToPaintDual>>, Var<Z>>;
+
+// pub type PipelineToPaint =
+// Choose<PaintPermissionGranted,
+// Choose<PaintPermissionRevoked,
+// Choose<PassCompositor,
+//        Choose<Eps, Recv<(), Eps>>>>>;
+
+// pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
+// pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Var<Z>>;
+// pub type Paint             = Send<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
+
+pub type CompositorToPaint = Choose<Paint, Eps>;
+pub type Paint             = Send<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
+
+//pub type CompositorToPaint = Choose<Var<Z>, Eps>;
 
 /// A uniquely-identifiable pipeline of script thread, layout thread, and paint thread.
 pub struct Pipeline {
@@ -44,7 +68,7 @@ pub struct Pipeline {
     /// A channel to layout, for performing reflows and shutdown.
     pub layout_chan: LayoutControlChan,
     /// A channel to the compositor.
-    pub compositor_proxy: Box<CompositorProxy + 'static + Send>,
+    pub compositor_proxy: Box<CompositorProxy + 'static + marker::Send>,
     pub chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
     pub layout_shutdown_port: IpcReceiver<()>,
     pub paint_shutdown_port: IpcReceiver<()>,
@@ -57,15 +81,50 @@ pub struct Pipeline {
     /// animations cause composites to be continually scheduled.
     pub running_animations: bool,
     pub children: Vec<FrameId>,
+    pub shared_with_chrome: Cell<bool>
 }
 
 /// The subset of the pipeline that is needed for layer composition.
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct CompositionPipeline {
     pub id: PipelineId,
     pub script_chan: IpcSender<ConstellationControlMsg>,
     pub layout_chan: LayoutControlChan,
     pub chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
+    paint_chan: RefCell<Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>> // Session typed channel
+}
+
+/// Implements methods for interacting with the paint channel
+impl CompositionPipeline {
+
+    pub fn paint(&self, request: Vec<PaintRequest>, frame_tree_id: FrameTreeId) {
+        self.with_paint_chan(|paint_chan| {
+            paint_chan.sel1().send((request, frame_tree_id)).zero()
+        });
+    }
+
+    pub fn close(&self) {
+        debug!("Composition{:?}: Closing paint chan", self.id);
+        let mut chan_ref = self.paint_chan.borrow_mut();
+        match chan_ref.take() {
+            Some(paint_chan) => paint_chan.sel2().close(),
+            None => panic!("Composition{:?}: Paint channel is closed!", self.id)
+        }
+    }
+
+
+    fn with_paint_chan<F>(&self, f: F)
+        where F: FnOnce(Chan<(CompositorToPaint, ()), CompositorToPaint>)
+                        -> Chan<(CompositorToPaint, ()), CompositorToPaint>
+    {
+        let mut chan_ref = self.paint_chan.borrow_mut();
+        if chan_ref.is_some() {
+            let paint_chan = chan_ref.take().unwrap();
+            *chan_ref = Some(f(paint_chan));
+        } else {
+            panic!("Composition{:?}: channel is closed!", self.id);
+        }
+    }
 }
 
 /// Initial setup data needed to construct a pipeline.
@@ -87,7 +146,7 @@ pub struct InitialPipelineState {
     /// A channel to schedule timer events.
     pub scheduler_chan: IpcSender<TimerEventRequest>,
     /// A channel to the compositor.
-    pub compositor_proxy: Box<CompositorProxy + 'static + Send>,
+    pub compositor_proxy: Box<CompositorProxy + 'static + marker::Send>,
     /// A channel to the developer tools, if applicable.
     pub devtools_chan: Option<Sender<DevtoolsControlMsg>>,
     /// A channel to the image cache thread.
@@ -250,7 +309,7 @@ impl Pipeline {
                parent_info: Option<(PipelineId, SubpageId)>,
                script_chan: IpcSender<ConstellationControlMsg>,
                layout_chan: LayoutControlChan,
-               compositor_proxy: Box<CompositorProxy + 'static + Send>,
+               compositor_proxy: Box<CompositorProxy + 'static + marker::Send>,
                chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
                layout_shutdown_port: IpcReceiver<()>,
                paint_shutdown_port: IpcReceiver<()>,
@@ -271,6 +330,7 @@ impl Pipeline {
             children: vec!(),
             size: size,
             running_animations: false,
+            shared_with_chrome: Cell::new(false),
         }
     }
 
@@ -316,13 +376,23 @@ impl Pipeline {
         let _ = layout_channel.send(LayoutControlMsg::ExitNow).unwrap();
     }
 
-    pub fn to_sendable(&self) -> CompositionPipeline {
-        CompositionPipeline {
+    pub fn to_sendable(&self) -> Option<CompositionPipeline> {
+        if self.shared_with_chrome.get() {
+            //debug!("{:?} has already been shared with chrome!", self.id);
+            return None;
+        }
+        self.shared_with_chrome.set(true);
+        let (for_chrome, for_paint_task) = session_channel();
+
+        // Dispatch for_paint_task to paint_task
+
+        Some(CompositionPipeline {
             id: self.id.clone(),
             script_chan: self.script_chan.clone(),
             layout_chan: self.layout_chan.clone(),
             chrome_to_paint_chan: self.chrome_to_paint_chan.clone(),
-        }
+            paint_chan: RefCell::new(Some(for_chrome.enter()))
+        })
     }
 
     pub fn add_child(&mut self, frame_id: FrameId) {
@@ -435,7 +505,7 @@ impl UnprivilegedPipelineContent {
 pub struct PrivilegedPipelineContent {
     id: PipelineId,
     painter_chan: ConstellationChan<PaintMsg>,
-    compositor_proxy: Box<CompositorProxy + Send + 'static>,
+    compositor_proxy: Box<CompositorProxy + marker::Send + 'static>,
     script_to_compositor_port: IpcReceiver<ScriptToCompositorMsg>,
     font_cache_thread: FontCacheThread,
     time_profiler_chan: time::ProfilerChan,

@@ -205,12 +205,16 @@ pub enum LayoutToPaintMsg {
     Exit(IpcSender<()>),
 }
 
-type ChromeToPaint = Offer<Paint, Offer<PaintPermissionGranted, Offer<PaintPermissionRevoked, Offer<CollectReports, ExitChrome>>>>;
+// Chrome to paint task
+type ChromeToPaint = Offer<Paint, Eps>;
 type Paint = Recv<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
+
+// Pipeline to paint task
+type PipelineToPaint = Offer<PaintPermissionGranted, Offer<PaintPermissionRevoked, Offer<CollectReports, Exit>>>;
 type PaintPermissionGranted = Var<Z>;
 type PaintPermissionRevoked = Var<Z>;
 type CollectReports = Recv<ReportsChan, Var<Z>>;
-type ExitChrome = Eps; // TODO(tj): This probably needs to change
+type Exit = Eps; // TODO(tj): This probably needs to change
 
 pub enum ChromeToPaintMsg {
     Paint(Vec<PaintRequest>, FrameTreeId),

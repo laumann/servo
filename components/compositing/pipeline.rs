@@ -39,7 +39,7 @@ use util::ipc::OptionalIpcSender;
 use util::opts::{self, Opts};
 use util::prefs;
 
-use session_types::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel};
+use session_types::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel, HasDual};
 
 // type PaintPermissionGranted = Var<Z>;
 // type PaintPermissionRevoked = Var<Z>;
@@ -81,7 +81,8 @@ pub struct Pipeline {
     /// animations cause composites to be continually scheduled.
     pub running_animations: bool,
     pub children: Vec<FrameId>,
-    pub shared_with_chrome: Cell<bool>
+    pub shared_with_chrome: Cell<bool>,
+    chrome_to_paint: RefCell<Option<Chan<(), Rec<<CompositorToPaint as HasDual>::Dual>>>>,
 }
 
 /// The subset of the pipeline that is needed for layer composition.
@@ -331,6 +332,7 @@ impl Pipeline {
             size: size,
             running_animations: false,
             shared_with_chrome: Cell::new(false),
+            chrome_to_paint: RefCell::new(None),
         }
     }
 
@@ -383,6 +385,7 @@ impl Pipeline {
         }
         self.shared_with_chrome.set(true);
         let (for_chrome, for_paint_task) = session_channel();
+        *self.chrome_to_paint.borrow_mut() = Some(for_paint_task); // TODO(tj): Pass this channel to paint task!
 
         // Dispatch for_paint_task to paint_task
 

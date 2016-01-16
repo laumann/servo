@@ -316,19 +316,27 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
     }
 
     fn start2(&mut self,
-              chrome_chan: Chan<(), Rec<ChromeToPaint>>,
+              pipeline_chan: Chan<(), Rec<PipelineToPaint>>,
               layout_chan: Chan<(), Rec<LayoutToPaint>>) {
-        debug!("");
+        debug!("PaintTask: begin paint loop");
 
-        let mut chrome_chan = Some(chrome_chan.enter());
+        let mut pipeline_chan = Some(pipeline_chan.enter());
         let mut layout_chan = Some(layout_chan.enter());
+        let mut chrome_chan = None;
+        //let mut pipeline_exit_chan = None;
 
-        enum ChanToRead { Chrome, Layout }
+        enum ChanToRead { Chrome, Layout, Pipeline }
 
-        while chrome_chan.is_some() || layout_chan.is_some() {
-            // LayoutToPaint chan
+        // TODO(tj): Write something about how shutdown is handled.
+        // The idea is basically that the task doesn't exit until all
+        // its channels have been closed. The EXIT message may be
+        // received from the pipeline, layout or chrome.
+        while chrome_chan.is_some() || layout_chan.is_some() || chrome_chan.is_some() {
             let chan_to_read = {
                 let mut sel = ChanSelect::new();
+                if let Some(ref pipeline_chan) = pipeline_chan {
+                    self.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
+                }
                 if let Some(ref chrome_chan) = chrome_chan {
                     sel.add_offer_ret(&chrome_chan, ChanToRead::Chrome);
                 }
@@ -338,16 +346,62 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
                 sel.wait()
             };
             match chan_to_read {
-                ChanToRead::Chrome => {
-                    //self.handle_chrome(&mut chrome_chan);
+                ChanToRead::Pipeline => {
+                    self.handle_pipeline(&mut pipeline_chan,
+                                         &mut chrome_chan);
                 }
                 ChanToRead::Layout => {
-
+                    self.handle_layout(&mut layout_chan);
+                }
+                ChanToRead::Chrome => {
+                    self.handle_chrome(&mut chrome_chan);
                 }
             }
         }
+        debug!("PaintTask for {:?} exiting", self.id);
     }
 
+    // type PipelineToPaint = Offer<PaintPermissionGranted, Offer<PaintPermissionRevoked, Offer<CollectReports, Exit>>>;
+
+    fn handle_pipeline(&mut self,
+                       pipeline_chan: &mut Option<Chan<E, P>>,
+                       chrome_chan: &mut Option<Chan<E, P>>)
+    {
+        let chan = pipeline_chan.take().expect("Pipeline channel unexpectedly closed!");
+        offer! {
+            chan,
+            PaintPermissionGranted => {
+                self.paint_permission = true;
+                if self.root_paint_layer.is_some() {
+                    self.initialize_layers();
+                }
+                *pipeline_chan = Some(chan.zero());
+            }
+            PaintPermissionRevoked => {
+                self.paint_permission = false;
+                *pipeline_chan = Some(chan.zero());
+            }
+            CollectReports => {
+                let (chan, channel) = chan.recv();
+                channel.send(Vec::new());
+                *pipeline_chan = Some(chan.zero());
+            }
+            PassCompositorChannel => {
+                let (chan, new_chan) = chan.recv();
+                debug!("Received compositor channel");
+                *pipeline_chan = Some(chan.zero());
+                *chrome_chan = Some(new_chan.enter());
+            }
+            // TODO(tj): Revise shutdown sequence
+            ForceExit => {
+                debug!("Forced exit");
+                chan.close();
+            }
+            Exit => {
+                if self.used
+            }
+        }
+    }
 
 
     fn start(&mut self) {

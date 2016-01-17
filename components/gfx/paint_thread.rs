@@ -193,10 +193,30 @@ pub enum Msg {
     FromChrome(ChromeToPaintMsg),
 }
 
-type LayoutToPaint = Offer<PaintInit, Offer<CanvasLayer, ExitLayout>>;
+// Layout to paint task
+type LayoutToPaint = Offer<PaintInit,
+                     Offer<CanvasLayer,
+                           ExitLayout>>;
 type PaintInit = Recv<(Epoch, PaintLayer), Var<Z>>;
 type CanvasLayer = Recv<(LayerId, IpcSender<CanvasMsg>), Var<Z>>;
-type ExitLayout = Eps; // TODO(tj): This probably needs to change
+type ExitLayout = Eps;
+
+// Chrome to paint task
+pub type ChromeToPaint = Offer<Paint, Eps>;
+pub type Paint = Recv<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
+
+// Pipeline to paint task
+pub type PipelineToPaint = Offer<PaintPermissionGranted,
+                           Offer<PaintPermissionRevoked,
+                           Offer<CollectReports,
+                           Offer<ConnectChrome,
+                                 Exit>>>>;
+
+pub type PaintPermissionGranted = Var<Z>;
+pub type PaintPermissionRevoked = Var<Z>;
+pub type CollectReports = Recv<ReportsChan, Var<Z>>;
+pub type ConnectChrome = Recv<Chan<(), Rec<ChromeToPaint>>, Var<Z>>;
+pub type Exit = Eps; // TODO(tj): This probably needs to change
 
 #[derive(Deserialize, Serialize)]
 pub enum LayoutToPaintMsg {
@@ -204,17 +224,6 @@ pub enum LayoutToPaintMsg {
     CanvasLayer(LayerId, IpcSender<CanvasMsg>),
     Exit(IpcSender<()>),
 }
-
-// Chrome to paint task
-type ChromeToPaint = Offer<Paint, Eps>;
-type Paint = Recv<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
-
-// Pipeline to paint task
-type PipelineToPaint = Offer<PaintPermissionGranted, Offer<PaintPermissionRevoked, Offer<CollectReports, Exit>>>;
-type PaintPermissionGranted = Var<Z>;
-type PaintPermissionRevoked = Var<Z>;
-type CollectReports = Recv<ReportsChan, Var<Z>>;
-type Exit = Eps; // TODO(tj): This probably needs to change
 
 pub enum ChromeToPaintMsg {
     Paint(Vec<PaintRequest>, FrameTreeId),
@@ -323,9 +332,12 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
         let mut pipeline_chan = Some(pipeline_chan.enter());
         let mut layout_chan = Some(layout_chan.enter());
         let mut chrome_chan = None;
-        //let mut pipeline_exit_chan = None;
 
-        enum ChanToRead { Chrome, Layout, Pipeline }
+        enum ChanToRead {
+            Chrome,
+            Layout,
+            Pipeline
+        }
 
         // TODO(tj): Write something about how shutdown is handled.
         // The idea is basically that the task doesn't exit until all
@@ -335,7 +347,7 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
             let chan_to_read = {
                 let mut sel = ChanSelect::new();
                 if let Some(ref pipeline_chan) = pipeline_chan {
-                    self.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
+                    sel.add_offer_ret(&pipeline_chan, ChanToRead::Pipeline);
                 }
                 if let Some(ref chrome_chan) = chrome_chan {
                     sel.add_offer_ret(&chrome_chan, ChanToRead::Chrome);
@@ -347,8 +359,7 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
             };
             match chan_to_read {
                 ChanToRead::Pipeline => {
-                    self.handle_pipeline(&mut pipeline_chan,
-                                         &mut chrome_chan);
+                    self.handle_pipeline(&mut pipeline_chan, &mut chrome_chan);
                 }
                 ChanToRead::Layout => {
                     self.handle_layout(&mut layout_chan);
@@ -361,11 +372,9 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
         debug!("PaintTask for {:?} exiting", self.id);
     }
 
-    // type PipelineToPaint = Offer<PaintPermissionGranted, Offer<PaintPermissionRevoked, Offer<CollectReports, Exit>>>;
-
     fn handle_pipeline(&mut self,
-                       pipeline_chan: &mut Option<Chan<E, P>>,
-                       chrome_chan: &mut Option<Chan<E, P>>)
+                       pipeline_chan: &mut Option<Chan<(PipelineToPaint, ()), PipelineToPaint>>,
+                       chrome_chan: &mut Option<Chan<(ChromeToPaint, ()), ChromeToPaint>>)
     {
         let chan = pipeline_chan.take().expect("Pipeline channel unexpectedly closed!");
         offer! {
@@ -376,33 +385,93 @@ impl<C> PaintThread<C> where C: PaintListener + marker::Send + 'static {
                     self.initialize_layers();
                 }
                 *pipeline_chan = Some(chan.zero());
-            }
+            },
             PaintPermissionRevoked => {
                 self.paint_permission = false;
                 *pipeline_chan = Some(chan.zero());
-            }
+            },
             CollectReports => {
                 let (chan, channel) = chan.recv();
                 channel.send(Vec::new());
                 *pipeline_chan = Some(chan.zero());
-            }
-            PassCompositorChannel => {
+            },
+            ConnectChrome => {
                 let (chan, new_chan) = chan.recv();
                 debug!("Received compositor channel");
                 *pipeline_chan = Some(chan.zero());
                 *chrome_chan = Some(new_chan.enter());
-            }
-            // TODO(tj): Revise shutdown sequence
-            ForceExit => {
-                debug!("Forced exit");
-                chan.close();
-            }
+            },
             Exit => {
-                if self.used
+                // TODO(tj): Revise shutdown sequence
+                debug!("Exiting");
+                chan.close();
             }
         }
     }
 
+    fn handle_layout(&mut self, layout_chan: &mut Option<Chan<(LayoutToPaint, ()), LayoutToPaint>>) {
+        let chan = layout_chan.take().expect("Layout channel unexpectedly closed!");
+        offer! {
+            chan,
+            PaintInit => {
+                let (chan, (epoch, paint_layer)) = chan.recv();
+                self.current_epoch = Some(epoch);
+                self.root_paint_layer = Some(Arc::new(paint_layer));
+                if self.paint_permission {
+                    self.initialize_layers();
+                }
+                *layout_chan = Some(chan.zero());
+            },
+            CanvasLayer => {
+                let (chan, (layer_id, canvas_renderer)) = chan.recv();
+                debug!("Renderer received for canvas with layer {:?}", layer_id);
+                self.canvas_map.insert(layer_id, canvas_renderer);
+                *layout_chan = Some(chan.zero());
+            },
+            Exit => {
+                self.compositor.notify_paint_thread_exiting(self.id);
+                debug!("PaintThread: Exiting (layout)");
+                chan.close();
+            }
+        }
+    }
+
+    // Handle a message from chrome (the compositor)
+    fn handle_chrome(&mut self, chrome_chan: &mut Option<Chan<(ChromeToPaint, ()), ChromeToPaint>>) {
+        let chan = chrome_chan.take().expect("Chroem channel unexpectedly closed!");
+        offer! {
+            chan,
+            Paint => {
+                let (chan, (requests, frame_tree_id)) = chan.recv();
+                if self.paint_permission && self.root_paint_layer.is_some() {
+                    let mut replies = Vec::new();
+                    for PaintRequest { buffer_requests, scale, layer_id, epoch, layer_kind }
+                    in requests {
+                        if self.current_epoch == Some(epoch) {
+                            self.paint(&mut replies, buffer_requests, scale, layer_id, layer_kind);
+                        } else {
+                            debug!("PaintThread: Ignoring requests with epoch mismatch: {:?} != {:?}",
+                                   self.current_epoch,
+                                   epoch);
+                            self.compositor.ignore_buffer_requests(buffer_requests);
+                        }
+                    }
+
+                    debug!("PaintThread: returning surfaces");
+                    self.compositor.assign_painted_buffers(self.id,
+                                                           self.current_epoch.unwrap(),
+                                                           replies,
+                                                           frame_tree_id);
+                }
+                *chrome_chan = Some(chan.zero());
+            },
+            Exit => {
+                self.compositor.notify_paint_thread_exiting(self.id);
+                debug!("PaintThread: Exiting (layout)");
+                chan.close();
+            }
+        }
+    }
 
     fn start(&mut self) {
         debug!("PaintThread: beginning painting loop");

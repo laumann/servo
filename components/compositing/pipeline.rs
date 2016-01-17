@@ -10,6 +10,8 @@ use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
 use gfx::font_cache_thread::FontCacheThread;
 use gfx::paint_thread::{ChromeToPaintMsg, LayoutToPaintMsg, PaintThread, PaintRequest};
+use gfx::paint_thread::PipelineToPaint as PipelineToPaintDual;
+use gfx::paint_thread::ChromeToPaint as ChromeToPaintDual;
 use gfx_traits::PaintMsg;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
@@ -41,24 +43,11 @@ use util::prefs;
 
 use session_types::{Chan, Send, Recv, Choose, Eps, Rec, Var, Z, session_channel, HasDual};
 
-// type PaintPermissionGranted = Var<Z>;
-// type PaintPermissionRevoked = Var<Z>;
-// type PassCompositor         = Send<Chan<(), Rec<CompositorToPaintDual>>, Var<Z>>;
-
-// pub type PipelineToPaint =
-// Choose<PaintPermissionGranted,
-// Choose<PaintPermissionRevoked,
-// Choose<PassCompositor,
-//        Choose<Eps, Recv<(), Eps>>>>>;
-
-// pub type CompositorToPaint = Choose<UnusedBuffer, Choose<Paint, Eps>>;
-// pub type UnusedBuffer      = Send<Vec<Box<LayerBuffer>>, Var<Z>>;
-// pub type Paint             = Send<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
-
-pub type CompositorToPaint = Choose<Paint, Eps>;
-pub type Paint             = Send<(Vec<PaintRequest>, FrameTreeId), Var<Z>>;
-
-//pub type CompositorToPaint = Choose<Var<Z>, Eps>;
+// type declarations for session types
+pub type PipelineToPaint = <PipelineToPaintDual as HasDual>::Dual;
+type ChromeToPaint = <ChromeToPaintDual as HasDual>::Dual;
+pub type PipelineToPaintChan = Chan<(PipelineToPaint, ()), PipelineToPaint>;
+pub type ChromeToPaintChan = Chan<(ChromeToPaint, ()), ChromeToPaint>;
 
 /// A uniquely-identifiable pipeline of script thread, layout thread, and paint thread.
 pub struct Pipeline {
@@ -70,6 +59,7 @@ pub struct Pipeline {
     /// A channel to the compositor.
     pub compositor_proxy: Box<CompositorProxy + 'static + marker::Send>,
     pub chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
+    pub pipeline_to_paint_chan: RefCell<Option<PipelineToPaintChan>>,
     pub layout_shutdown_port: IpcReceiver<()>,
     pub paint_shutdown_port: IpcReceiver<()>,
     /// URL corresponding to the most recently-loaded page.
@@ -82,7 +72,6 @@ pub struct Pipeline {
     pub running_animations: bool,
     pub children: Vec<FrameId>,
     pub shared_with_chrome: Cell<bool>,
-    chrome_to_paint: RefCell<Option<Chan<(), Rec<<CompositorToPaint as HasDual>::Dual>>>>,
 }
 
 /// The subset of the pipeline that is needed for layer composition.
@@ -92,7 +81,7 @@ pub struct CompositionPipeline {
     pub script_chan: IpcSender<ConstellationControlMsg>,
     pub layout_chan: LayoutControlChan,
     pub chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
-    paint_chan: RefCell<Option<Chan<(CompositorToPaint, ()), CompositorToPaint>>> // Session typed channel
+    paint_chan: RefCell<Option<ChromeToPaintChan>>,
 }
 
 /// Implements methods for interacting with the paint channel
@@ -113,11 +102,7 @@ impl CompositionPipeline {
         }
     }
 
-
-    fn with_paint_chan<F>(&self, f: F)
-        where F: FnOnce(Chan<(CompositorToPaint, ()), CompositorToPaint>)
-                        -> Chan<(CompositorToPaint, ()), CompositorToPaint>
-    {
+    fn with_paint_chan<F>(&self, f: F) where F: FnOnce(ChromeToPaintChan) -> ChromeToPaintChan {
         let mut chan_ref = self.paint_chan.borrow_mut();
         if chan_ref.is_some() {
             let paint_chan = chan_ref.take().unwrap();
@@ -324,6 +309,7 @@ impl Pipeline {
             layout_chan: layout_chan,
             compositor_proxy: compositor_proxy,
             chrome_to_paint_chan: chrome_to_paint_chan,
+            pipeline_to_paint_chan: RefCell::new(None),
             layout_shutdown_port: layout_shutdown_port,
             paint_shutdown_port: paint_shutdown_port,
             url: url,
@@ -332,9 +318,21 @@ impl Pipeline {
             size: size,
             running_animations: false,
             shared_with_chrome: Cell::new(false),
-            chrome_to_paint: RefCell::new(None),
         }
     }
+
+    fn with_paint_chan<F>(&self, func: F)
+        where F: FnOnce(PipelineToPaintChan) -> PipelineToPaintChan
+    {
+        let mut chan_ref = self.pipeline_to_paint_chan.borrow_mut();
+        if chan_ref.is_some() {
+            let paint_chan = chan_ref.take().unwrap();
+            *chan_ref = Some(func(paint_chan));
+        } else {
+            panic!("with_paint_chan failed!");
+        }
+    }
+
 
     pub fn grant_paint_permission(&self) {
         let _ = self.chrome_to_paint_chan.send(ChromeToPaintMsg::PaintPermissionGranted);
@@ -380,14 +378,16 @@ impl Pipeline {
 
     pub fn to_sendable(&self) -> Option<CompositionPipeline> {
         if self.shared_with_chrome.get() {
-            //debug!("{:?} has already been shared with chrome!", self.id);
+            debug!("{:?} has already been shared with chrome!", self.id);
             return None;
         }
         self.shared_with_chrome.set(true);
         let (for_chrome, for_paint_task) = session_channel();
-        *self.chrome_to_paint.borrow_mut() = Some(for_paint_task); // TODO(tj): Pass this channel to paint task!
 
         // Dispatch for_paint_task to paint_task
+        self.with_paint_chan(|paint_chan| {
+            paint_chan.skip3().sel1().send(for_paint_task).zero()
+        });
 
         Some(CompositionPipeline {
             id: self.id.clone(),
